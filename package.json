@@ -1,0 +1,9 @@
+{
+  "name": "lovlive-face-analysis",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": { "dev": "node dev/server.mjs" },
+  "dependencies": { "google-auth-library": "^9.15.0" },
+  "engines": { "node": ">=18" }
+}

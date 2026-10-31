@@ -1,21 +1,15 @@
-import { send, readBody, requireUser, loadKB, callClaude, imgPart, parseOrRepair } from "./_lib.js";
+import { send, readBody, requireUser, loadKB, callAnalysis, imgPart, parseOrRepair } from "./_lib.js";
 import { mockRatios, mockReport } from "./_mock.js";
 
-const SCHEMA = `{
-  "faceType": ["둥근형"],                 // 계란형|둥근형|하트형|사각형|다이아몬드형|육각형 중 1~2개
-  "faceReason": "판정 근거 한두 문장(편집자 참고용)",
-  "side": {"forehead": "둥근 형태|수직형 (반듯한)이마|볼록한 이마", "mouth": "돌출된|중립적인|들어가보이는", "profile": "평면형|볼록형|오목형"},
-  "sideSummary": "파란 글씨 요약 2문장",
-  "sidePoints": {"hairline":[x,y], "glabella":[x,y], "noseTip":[x,y], "subnasale":[x,y], "stomion":[x,y], "chin":[x,y], "ear":[x,y]},
-  "ratioText": {"thirds": "...", "aspect": "...", "eyePos": "...", "eyeDist": "...", "noseMouth": "코 위치 문단\\n\\n입 위치 문단\\n\\n따라서 … 종합 문단"},
-  "glasses": ["보스턴형", "웨이퍼러형", "스퀘어형"],
-  "earrings": [["small","short"], ["small","medium"]],
-  "makeup": {
-    "annotations": [{"key":"forehead_hl","on":true,"label":"하이라이터"}, {"key":"brow","on":true,"label":"세미아치형 눈썹"}, {"key":"blush","on":true,"label":"블러셔","shape":"horizontal"}],
-    "strategy": [{"title":"눈썹과 눈썹 주변","text":"..."},{"title":"아이메이크업","text":"..."},{"title":"블러셔","text":"..."},{"title":"쉐딩","text":"..."},{"title":"하이라이터","text":"..."},{"title":"입술","text":"..."}]
-  },
-  "hair": {"subtitle": "가로폭 확장, 여백 보완, 하단 볼륨", "caution": "…, …, …", "best": [{"id":"h70","title":"...","style":"...","point":"..."}]}
-}`;
+const EXTRA = `추가로 아래 키도 함께 출력하라:
+"faceTypeKey": "oval|round|long|heart|square|hexagon|diamond" 중 하나 (긴 하트형처럼 복합형이면 가장 가까운 기본형, 라벨 문구 p2.chip1에는 'LONG HEART SHAPE : 긴 하트형'처럼 복합형으로 써도 된다),
+"sidePoints": {"noseTip":[x,y],"lip":[x,y],"chin":[x,y],"ear":[x,y]}  — 측면 사진 기준 0~1 정규화 좌표(ear는 귓불 위치),
+"makeupGuide": {"intro":"부제 2줄","core":["핵심 포인트 4개"],"overall":"전체적인 인상과 메이크업 방향 2~3문장","sections":[{"title":"눈썹 메이크업","sub":"한 줄 부제","steps":["앞머리: …","눈썹산: …","꼬리: …"]}, … 10개: 눈썹 메이크업, 아이섀도우, 아이라인, 언더 메이크업, 속눈썹 메이크업, 코 메이크업, 블러셔, 윤곽 셰이딩, 립 메이크업, 피부 표현 (각 steps 2~4개, 각 25자 이내)]}.
+hair.items[].prompt / glasses.items[].prompt / earrings.items[].prompt 에는 GPT 이미지 생성용 영어 설명(길이·컬·볼륨·가르마·앞머리 / 테 모양·소재·색 / 귀걸이 모양·소재·크기·길이)을 1~2문장으로 쓴다.
+hair.items[].ref 에는 [헤어 라이브러리]에서 그 스타일과 가장 비슷한 사진 id를 하나 넣는다(없으면 빈 문자열).
+glasses.items[].shape 는 round|softSquare|oval|boston|wellington|cateye|rimless|hexa, color 는 silver|gold|rosegold|gunmetal|brown|black|clear|tortoise.
+earrings.items[].shape 는 stud|pearl|drop|huggie|hoop|ovalHoop|cluster, color 는 gold|silver|rosegold.
+scales 는 0~4 정수 6개, hair.avoid 는 줄바꿈(\\n)으로 구분된 5줄.`;
 
 export default async function handler(req, res) {
   try {
@@ -23,44 +17,46 @@ export default async function handler(req, res) {
     await requireUser(req);
     const body = await readBody(req);
 
-    /* ---- 1) 비율 앱 캡처 읽기 ---- */
     if (body.task === "ratios") {
       if (process.env.MOCK_AI === "1") return send(res, 200, mockRatios());
       const imgs = (body.images || []).map(imgPart).filter(Boolean).slice(0, 8);
-      const text = await callClaude({
+      const text = await callAnalysis({
         system: "너는 얼굴 비율 측정 앱 화면 캡처에서 숫자를 정확히 읽는 도우미다. JSON만 출력한다.",
-        content: [...imgs, { type: "text", text: `캡처 화면들에서 '비율 1 : …' 값을 읽어 아래 JSON으로만 답하라. 화면 제목으로 항목을 구분한다(얼굴 세로 비율, 얼굴 종횡비, 눈 위치, 눈 거리, 코 위치, 입 위치). 없는 항목은 null. 평가 등급(S/A/B/C)도 함께.
-{"thirds":"1:1.3:0.9","aspect":"1:1.46","eyePos":"1:0.9","eyeDist":"1:1.5:1.0","nosePos":"1:0.7","mouthPos":"1:1.4","grades":{"thirds":"B","aspect":"S","eyePos":"S","eyeDist":"B","nosePos":"C","mouthPos":"C"}}` }],
+        content: [...imgs, { type: "text", text: `캡처 화면들에서 '비율 1 : …' 값을 읽어 아래 JSON으로만 답하라. 화면 제목으로 항목을 구분한다(얼굴 세로 비율=thirds, 얼굴 종횡비=aspect, 눈 위치=eyePos, 눈 거리=eyeDist, 코 위치=nosePos, 입 위치=mouthPos). 없는 항목은 null.
+{"thirds":"1:1.3:0.9","aspect":"1:1.46","eyePos":"1:0.9","eyeDist":"1:1.5:1.0","nosePos":"1:0.7","mouthPos":"1:1.4"}` }],
         maxTokens: 800,
       });
       return send(res, 200, await parseOrRepair(text));
     }
 
-    /* ---- 2) 보고서 전체 분석 ---- */
     if (body.task === "report") {
       if (process.env.MOCK_AI === "1") return send(res, 200, mockReport(body));
       const kb = loadKB();
-      const hairList = kb.hair.map(h => `${h.id} | ${h.name} | 길이:${h.length} | ${h.curl} | 기존 사용 얼굴형:${h.fromFace || "-"}`).join("\n");
-      const system = `${kb.knowledge}\n\n${kb.gold}\n\n# 참고: 하영님이 직접 작성한 분석 초안(방법론·처방 논리 참고용, 결과지는 기준 예시처럼 간결하게)\n${kb.drafts}`;
-      const recent = (body.recentExamples || []).slice(0, 3).map((e, i) => `### 최근 저장 보고서 ${i + 1}\n${JSON.stringify(e).slice(0, 5000)}`).join("\n\n");
+      const system = `${kb.knowledge}\n\n${kb.gold}\n\n# 참고: 하영님 분석 초안(처방 논리 참고용)\n${kb.drafts}`;
       const content = [];
       const f = imgPart(body.front), s = imgPart(body.side);
       if (f) content.push({ type: "text", text: "[정면 사진]" }, f);
       if (s) content.push({ type: "text", text: "[측면 사진]" }, s);
-      content.push({ type: "text", text: `고객: ${body.name || "고객"} (부를 때: ${body.callName || body.name || "고객"} 님)
+      const recent = (body.recent || []).slice(0, 3).map((e, i) => `### 최근 보고서 ${i + 1}\n${JSON.stringify(e).slice(0, 4000)}`).join("\n\n");
+      content.push({ type: "text", text: `고객: ${body.name || "고객"}
 상담 메모: ${body.memo || "-"}
-측정 비율(별도 앱 측정값, 그대로 사용): 세로 ${body.ratios?.thirds} / 종횡비 ${body.ratios?.aspect} / 눈 위치 ${body.ratios?.eyePos} / 눈 거리 ${body.ratios?.eyeDist} / 코 위치 ${body.ratios?.nosePos} / 입 위치 ${body.ratios?.mouthPos}
-정면 사진 윤곽 수치(자동 측정, 참고용): ${JSON.stringify(body.faceMetrics || {})}
+측정 비율(비율 앱 측정값 — 숫자는 바꾸지 말 것): 종횡비 ${body.ratios?.aspect} / 상:중:하 ${body.ratios?.thirds} / 눈 너비 ${body.ratios?.eyes} / 눈 위치 ${body.ratios?.eyePos} / 코 위치 ${body.ratios?.nosePos} / 입 위치 ${body.ratios?.mouthPos}
 
-[헤어 라이브러리 — 이 중에서만 id 선택]
-${hairList}
-${recent ? "\n[같은 방식으로 최근 작성된 보고서 — 문체 참고]\n" + recent : ""}
+[헤어 라이브러리: id|이름|길이|기존 얼굴형]
+${body.hairLib || ""}
+${recent ? "\n[최근 작성 보고서 — 문체 참고]\n" + recent : ""}
 
-위 지침과 기준 예시에 맞춰 이 고객의 분석결과지 내용을 작성하라. 아래 스키마의 JSON 하나만 출력한다. 주석(//)은 쓰지 말 것. 문장 안에서 큰따옴표(")는 쓰지 말고 작은따옴표(')를 쓸 것. 줄바꿈은 \\n으로 쓸 것. 배열·객체 사이 쉼표를 빠뜨리지 말 것.
-${SCHEMA}` });
-      const text = await callClaude({ system, content, maxTokens: 7000 });
-      const out = await parseOrRepair(text);
-      return send(res, 200, out);
+아래 [현재 초안]은 프로그램이 규칙으로 만든 기본 문장이다. 사진과 비율을 직접 분석해서, 기준 보고서(김희주님)와 같은 문체·길이로 이 고객에게 맞게 모든 값을 새로 작성하라.
+- 같은 키 구조 그대로, 배열 길이와 줄바꿈(\\n) 개수도 초안과 비슷하게 유지(지면이 고정된 양식).
+- p3.desc 는 카드 한 줄(22~30자), side.axes[].title 은 '부위 : 요약 + 요약' 형식.
+- 측면 4축: 이마·눈썹뼈 / 콧대·코끝 / 입술(E-line 기준) / 턱끝·턱선.
+${EXTRA}
+출력은 JSON 하나만. 주석 금지. 문장 안에는 큰따옴표 대신 작은따옴표 사용.
+
+[현재 초안]
+${JSON.stringify(body.draft || {})}` });
+      const text = await callAnalysis({ system, content, maxTokens: 12000 });
+      return send(res, 200, await parseOrRepair(text));
     }
     return send(res, 400, { error: "unknown task" });
   } catch (e) {

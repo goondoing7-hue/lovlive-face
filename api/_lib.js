@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { OAuth2Client } from "google-auth-library";
+import { jsonrepair } from "jsonrepair";
 
 export const ALLOWED = (process.env.ALLOWED_EMAILS || "goondoing7@gmail.com,chayoung9310@gmail.com")
   .split(",").map(s => s.trim().toLowerCase()).filter(Boolean);
@@ -63,7 +64,18 @@ export function imgPart(dataURL) {
   return { type: "image", source: { type: "base64", media_type: m[1], data: m[2] } };
 }
 export function parseJSON(text) {
-  const a = text.indexOf("{"), b = text.lastIndexOf("}");
+  let t = String(text || "").replace(/```(?:json)?/gi, "");
+  const a = t.indexOf("{"), b = t.lastIndexOf("}");
   if (a < 0 || b < 0) throw Object.assign(new Error("AI 응답을 읽을 수 없습니다"), { code: 502 });
-  return JSON.parse(text.slice(a, b + 1));
+  t = t.slice(a, b + 1);
+  try { return JSON.parse(t); } catch (e1) {}
+  try { return JSON.parse(jsonrepair(t)); } catch (e2) {}
+  return null;
+}
+/** JSON 파싱 실패 시: 자동 복구 → 그래도 안 되면 AI에게 형식만 고쳐 달라고 1회 재요청 */
+export async function parseOrRepair(text) {
+  const j = parseJSON(text); if (j) return j;
+  const fixed = await callClaude({ system: "너는 깨진 JSON을 고치는 도우미다. 내용은 바꾸지 말고 문법만 고쳐 올바른 JSON 하나만 출력한다.", content: [{ type: "text", text }], maxTokens: 8000 });
+  const j2 = parseJSON(fixed); if (j2) return j2;
+  throw Object.assign(new Error("AI 응답 형식 오류 — 한 번 더 실행해 주세요"), { code: 502 });
 }

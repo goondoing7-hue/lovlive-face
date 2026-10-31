@@ -1,4 +1,4 @@
-import { send, readBody, requireUser, loadKB, callClaude, imgPart, parseJSON } from "./_lib.js";
+import { send, readBody, requireUser, loadKB, callClaude, imgPart, parseOrRepair } from "./_lib.js";
 import { mockRatios, mockReport } from "./_mock.js";
 
 const SCHEMA = `{
@@ -33,7 +33,7 @@ export default async function handler(req, res) {
 {"thirds":"1:1.3:0.9","aspect":"1:1.46","eyePos":"1:0.9","eyeDist":"1:1.5:1.0","nosePos":"1:0.7","mouthPos":"1:1.4","grades":{"thirds":"B","aspect":"S","eyePos":"S","eyeDist":"B","nosePos":"C","mouthPos":"C"}}` }],
         maxTokens: 800,
       });
-      return send(res, 200, parseJSON(text));
+      return send(res, 200, await parseOrRepair(text));
     }
 
     /* ---- 2) 보고서 전체 분석 ---- */
@@ -56,10 +56,10 @@ export default async function handler(req, res) {
 ${hairList}
 ${recent ? "\n[같은 방식으로 최근 작성된 보고서 — 문체 참고]\n" + recent : ""}
 
-위 지침과 기준 예시에 맞춰 이 고객의 분석결과지 내용을 작성하라. 아래 스키마의 JSON 하나만 출력한다(주석 제외).
+위 지침과 기준 예시에 맞춰 이 고객의 분석결과지 내용을 작성하라. 아래 스키마의 JSON 하나만 출력한다. 주석(//)은 쓰지 말 것. 문장 안에서 큰따옴표(")는 쓰지 말고 작은따옴표(')를 쓸 것. 줄바꿈은 \\n으로 쓸 것. 배열·객체 사이 쉼표를 빠뜨리지 말 것.
 ${SCHEMA}` });
       const text = await callClaude({ system, content, maxTokens: 7000 });
-      const out = parseJSON(text);
+      const out = await parseOrRepair(text);
       return send(res, 200, out);
     }
     return send(res, 400, { error: "unknown task" });

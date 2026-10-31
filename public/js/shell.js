@@ -85,6 +85,7 @@ async function driveSave() {
     const imgs = [["헤어", st.texts.hair.items], ["안경", st.texts.glasses.items], ["귀걸이", st.texts.earrings.items]];
     for (const [n, arr] of imgs) for (let i = 0; i < arr.length; i++) if (arr[i].img) await gdUpload(`${n}${i + 1}.jpg`, await b(arr[i].img), sub);
     if (st.texts.makeup.fullImage) await gdUpload("메이크업가이드.jpg", await b(st.texts.makeup.fullImage), sub);
+    if (st.texts.makeup.guideImg) await gdUpload("메이크업사진.jpg", await b(st.texts.makeup.guideImg), sub);
     toast(`드라이브에 저장했어요: ${CFG.driveFolder} / ${fileBase()}`);
   } catch (e) { toast("저장 실패: " + esc(e.message), 7000); }
   busy();

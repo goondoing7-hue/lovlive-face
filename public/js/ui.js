@@ -15,7 +15,7 @@ const STEPS = [
 
 function newState() {
   const s = {
-    version: 1, step: 1, edited: [],
+    version: 1, step: 1, edited: [], costs: [], locked: [],
     client: { name: "", date: today(), memo: "" },
     photos: { front: null, frontOrig: null },
     front: { w: 600, h: 800, pts: null, lines: defaultLines(600, 800), ratios: null, raw: null, frame: { zoom: 1, dx: 0, dy: 0 }, rot: 0, auto: false },
@@ -42,7 +42,7 @@ const isEdited = p => st.edited.includes(p);
 function markEdited(p) { if (!st.edited.includes(p)) st.edited.push(p); }
 
 /* ---- 문장 재생성 (사용자가 고친 칸은 유지) ---- */
-const KEEP_KEYS = new Set(["img", "useUpload", "fullImage", "mode", "cands", "prompt", "ref"]);
+const KEEP_KEYS = new Set(["img", "useUpload", "fullImage", "mode", "cands", "prompt", "ref", "candQ", "imgQ", "guideImg", "guideLm", "guideCands", "guideCandQ", "guideQ", "stale"]);
 function regenerate(force = false, only = null) {
   const fresh = generateTexts(st);
   const walk = (dst, src, path) => {
@@ -488,27 +488,37 @@ function bindImgSlots(E) {
 /* ---------- AI 이미지 생성 블록 ---------- */
 function aiBlock(kind, i) {
   const item = (kind === "hair" ? st.texts.hair : st.texts[kind]).items[i]; const cands = item.cands || [];
-  return `<div class="aiblk">${item.stale && item.img ? `<div class="status err" style="margin:0 0 6px">선택이 바뀌었어요 — 이미지를 다시 생성하는 것을 권장합니다</div>` : ""}${field(`texts.${kind === "hair" ? "hair" : kind}.items.${i}.prompt`, "이미지 생성 설명 (AI가 작성, 수정 가능)", { rows: 2 })}<div class="row" style="margin-top:6px"><button class="btn sm pri" data-ai="${kind}:${i}">✨ GPT로 이미지 생성 (20~60초)</button><span class="mut">여러 번 만들어 마음에 드는 것을 고르세요</span></div>
-    ${cands.length ? `<div class="thumbs" style="margin-top:8px">${cands.map((c, j) => `<div class="th"><div style="border:2px solid ${item.img === c ? "var(--br)" : "transparent"}"><img src="${BlobCache.get(c)}" data-pick="${kind}:${i}:${j}" style="cursor:pointer"></div><button class="btn sm ghost" data-candel="${kind}:${i}:${j}">삭제</button></div>`).join("")}</div><div class="mut">썸네일을 클릭하면 보고서에 사용됩니다.</div>` : ""}</div>`;
+  return `<div class="aiblk">${item.stale && item.img ? `<div class="status err" style="margin:0 0 6px">선택이 바뀌었어요 — 이미지를 다시 생성하는 것을 권장합니다</div>` : ""}${field(`texts.${kind === "hair" ? "hair" : kind}.items.${i}.prompt`, "이미지 생성 설명 (AI가 작성, 수정 가능)", { rows: 2 })}${genButtons(`data-ai="${kind}:${i}"`, item.img && item.imgQ === "low", kind === "earrings" ? "pt" : "sq")}
+    ${cands.length ? `<div class="thumbs" style="margin-top:8px">${cands.map((c, j) => `<div class="th"><div style="border:2px solid ${item.img === c ? "var(--br)" : "transparent"};position:relative"><img src="${BlobCache.get(c)}" data-pick="${kind}:${i}:${j}" style="cursor:pointer">${qTag((item.candQ || [])[j])}</div><button class="btn sm ghost" data-candel="${kind}:${i}:${j}">삭제</button></div>`).join("")}</div><div class="mut">썸네일을 클릭하면 보고서에 사용됩니다.</div>` : ""}</div>`;
 }
 let _aiConsent = false;
-async function runAI(kind, i, btn) {
+/* 비용(원, 대략): gpt-image-1.5 저품질/중간 — 정사각 / 세로 */
+const PRICE_KRW = { sq: { low: 13, medium: 48 }, pt: { low: 18, medium: 70 } };
+const qTag = q => q === "low" ? `<span style="position:absolute;left:3px;top:3px;background:#fff3bf;color:#7a5a00;font-size:10px;padding:1px 5px;border-radius:6px">시안</span>` : q ? `<span style="position:absolute;left:3px;top:3px;background:#e6fcf5;color:#087f5b;font-size:10px;padding:1px 5px;border-radius:6px">확정</span>` : "";
+function genButtons(attr, canUpgrade, sz = "pt", n = 1) {
+  const P = PRICE_KRW[sz];
+  return `<div class="row" style="margin-top:6px;flex-wrap:wrap;gap:6px"><button class="btn sm" ${attr} data-mode="draft">🧪 시안 (저품질 · 약 ${P.low * n}원)</button><button class="btn sm pri" ${attr} data-mode="final">✨ 확정 (중간 품질 · 약 ${P.medium * n}원)</button>${canUpgrade ? `<button class="btn sm pri" ${attr} data-mode="upgrade">⬆ 고른 시안을 그대로 확정 (약 ${P.medium * n}원)</button>` : ""}</div><div class="mut">시안으로 여러 번 뽑아 보고, 마음에 드는 것을 골라 '그대로 확정'하면 비용이 가장 적게 듭니다.</div>`;
+}
+async function runAI(kind, i, btn, mode = "final") {
   if (!_aiConsent) { if (!confirm("고객 사진이 OpenAI(GPT 이미지)로 전송됩니다.\n고객에게 동의를 받으셨나요?")) return; _aiConsent = true; }
   const items = (kind === "hair" ? st.texts.hair : st.texts[kind]).items; const item = items[i];
+  const base = mode === "upgrade" && item.img && item.imgQ === "low" ? item.img : null;
+  if (mode === "upgrade" && !base) mode = "final";
   if (btn) { btn.disabled = true; btn.textContent = "생성 중… (20~60초)"; }
   try {
-    const raw = await generateAIImage(kind, st, item); const img = await shrinkDataURL(raw, 1100);
-    item.cands = [...(item.cands || []), img].slice(-6); item.stale = false;
-    if (!item.img || kind === "hair" || !item.useUpload) { item.img = img; if (kind !== "hair") item.useUpload = true; }
+    const r = await generateAIImage(kind, st, item, { mode: mode === "draft" ? "draft" : "final", base }); const img = await shrinkDataURL(r.image, 1100);
+    const cq = (item.candQ || []).slice(-(item.cands || []).length); item.cands = [...(item.cands || []), img]; item.candQ = [...cq, r.quality];
+    if (item.cands.length > 6) { item.cands = item.cands.slice(-6); item.candQ = item.candQ.slice(-6); }
+    item.stale = false; item.img = img; item.imgQ = r.quality; if (kind !== "hair") item.useUpload = true;
     autosave(); renderPreview(); renderNav();
   } catch (e) { console.error(e); toast("AI 생성 실패: " + esc(e.message), 6000); }
   if (st.step === (kind === "hair" ? 5 : kind === "glasses" ? 7 : 8)) renderEditor();
 }
 function bindAI(E) {
-  $$("[data-ai]", E).forEach(b => b.onclick = () => { const [k, i] = b.dataset.ai.split(":"); runAI(k, +i, b); });
-  $$("[data-aiall]", E).forEach(b => b.onclick = async () => { const k = b.dataset.aiall; b.disabled = true; b.textContent = "3개 생성 중…"; await Promise.all([0, 1, 2].map(i => runAI(k, i, null))); });
-  $$("[data-pick]", E).forEach(im => im.onclick = () => { const [k, i, j] = im.dataset.pick.split(":"); const it = (k === "hair" ? st.texts.hair : st.texts[k]).items[+i]; it.img = it.cands[+j]; if (k !== "hair") it.useUpload = true; renderEditor(); renderPreview(); autosave(); });
-  $$("[data-candel]", E).forEach(b => b.onclick = () => { const [k, i, j] = b.dataset.candel.split(":"); const it = (k === "hair" ? st.texts.hair : st.texts[k]).items[+i]; const c = it.cands[+j]; it.cands.splice(+j, 1); if (it.img === c) { it.img = it.cands[it.cands.length - 1] || null; if (k !== "hair" && !it.img) it.useUpload = false; } renderEditor(); renderPreview(); autosave(); });
+  $$("[data-ai]", E).forEach(b => b.onclick = () => { const [k, i] = b.dataset.ai.split(":"); runAI(k, +i, b, b.dataset.mode || "final"); });
+  $$("[data-aiall]", E).forEach(b => b.onclick = async () => { const k = b.dataset.aiall, m = b.dataset.mode || "final"; b.disabled = true; b.textContent = "3개 생성 중…"; await Promise.all([0, 1, 2].map(i => runAI(k, i, null, m === "final" ? "upgrade" : m))); });
+  $$("[data-pick]", E).forEach(im => im.onclick = () => { const [k, i, j] = im.dataset.pick.split(":"); const it = (k === "hair" ? st.texts.hair : st.texts[k]).items[+i]; it.img = it.cands[+j]; it.imgQ = (it.candQ || [])[+j] || "medium"; if (k !== "hair") it.useUpload = true; renderEditor(); renderPreview(); autosave(); });
+  $$("[data-candel]", E).forEach(b => b.onclick = () => { const [k, i, j] = b.dataset.candel.split(":"); const it = (k === "hair" ? st.texts.hair : st.texts[k]).items[+i]; const c = it.cands[+j]; it.cands.splice(+j, 1); if (it.candQ) it.candQ.splice(+j, 1); if (it.img === c) { it.img = it.cands[it.cands.length - 1] || null; if (k !== "hair" && !it.img) it.useUpload = false; } renderEditor(); renderPreview(); autosave(); });
 }
 
 /* ---------- 5. 헤어 ---------- */
@@ -516,7 +526,7 @@ function viewHair() {
   const t = st.texts.hair; const lib = FACE_TYPES[st.type.key].hair.items;
   const others = FACE_TYPE_KEYS.filter(k => k !== st.type.key).flatMap(k => FACE_TYPES[k].hair.items.map(x => ({ ...x, from: FACE_TYPES[k].ko })));
   return `<h2>5. 헤어 BEST 3</h2><p class="lead">고객 정면 사진으로 GPT가 헤어스타일을 입힌 사진을 만듭니다. 기존 보고서의 헤어 사진(${HAIR_LIB.length}장)을 '참고 사진'으로 고르면 그 스타일을 더 정확하게 따라 합니다.</p>
-  <div class="card">${field("texts.hair.keywords", "키워드 (굵은 글씨)", { input: true })}${field("texts.hair.desc", "설명 2줄")}<div class="row" style="margin-top:8px"><button class="btn sm pri" data-aiall="hair">✨ 헤어 3개 한꺼번에 생성</button></div></div>
+  <div class="card">${field("texts.hair.keywords", "키워드 (굵은 글씨)", { input: true })}${field("texts.hair.desc", "설명 2줄")}<div class="row" style="margin-top:8px"><button class="btn sm" data-aiall="hair" data-mode="draft">🧪 헤어 3개 시안 (약 ${PRICE_KRW.sq.low * 3}원)</button><button class="btn sm pri" data-aiall="hair" data-mode="final">✨ 헤어 3개 확정 (약 ${PRICE_KRW.sq.medium * 3}원)</button></div><div class="mut">'확정'은 시안을 고른 칸은 그 시안을 그대로 고화질로, 나머지는 새로 만듭니다.</div></div>
   ${t.items.map((it, i) => `<div class="card"><h3>BEST 0${i + 1}</h3><select data-hairpick="${i}"><option value="">— 추천 후보에서 고르기 —</option><optgroup label="${FACE_TYPES[st.type.key].ko} 추천">${lib.map((x, j) => `<option value="a${j}">${esc(x.name.replace(/\n/g, " "))}</option>`).join("")}</optgroup><optgroup label="다른 얼굴형 후보">${others.map((x, j) => `<option value="b${j}">${esc(x.name.replace(/\n/g, " "))} (${x.from})</option>`).join("")}</optgroup></select>
     <div class="grid2"><div>${field(`texts.hair.items.${i}.name`, "스타일 이름")}</div><div>${field(`texts.hair.items.${i}.desc`, "설명")}</div></div>
     <details ${it.ref ? "open" : ""}><summary>참고 헤어 사진 ${it.ref ? "— " + esc((HAIR_LIB.find(h => h.id === it.ref) || {}).name || it.ref) : "(선택)"}</summary><div class="hgal">${HAIR_LIB.map(h => `<div data-href="${i}:${h.id}" class="${it.ref === h.id ? "on" : ""}"><img src="hair/${h.id}.jpg" loading="lazy"><span>${esc(h.name)}</span></div>`).join("")}</div>${it.ref ? `<button class="btn sm ghost" data-hrefclr="${i}">참고 사진 해제</button>` : ""}</details>
@@ -536,17 +546,37 @@ POST[5] = E => {
 };
 
 /* ---------- 6. 메이크업 ---------- */
+async function runMakeupGuide(btn, mode) {
+  if (!_aiConsent) { if (!confirm("고객 사진이 OpenAI(GPT 이미지)로 전송됩니다.\n고객에게 동의를 받으셨나요?")) return; _aiConsent = true; }
+  const t = st.texts.makeup; const base = mode === "upgrade" && t.guideImg && t.guideQ === "low" ? t.guideImg : null;
+  btn.disabled = true; btn.textContent = "생성 중… (30초~1분)";
+  try {
+    const r = await generateAIImage("makeup", st, null, { mode: mode === "draft" ? "draft" : "final", base });
+    const img = await shrinkDataURL(r.image, 1536);
+    let lm = null; try { lm = await detectLandmarks(img); } catch (e) { console.warn(e); }
+    t.guideCands = [...(t.guideCands || []), { img, lm, q: r.quality }].slice(-6);
+    t.guideImg = img; t.guideLm = lm; t.guideQ = r.quality; t.mode = "guide";
+    if (!lm) toast("생성된 사진에서 얼굴을 찾지 못했어요. 다시 생성해 주세요.", 6000);
+    autosave(); renderPreview();
+  } catch (e) { toast("생성 실패: " + esc(e.message), 7000); }
+  if (st.step === 6) renderEditor();
+}
 function viewMakeup() {
   const t = st.texts.makeup;
   const G = st.texts.makeupGuide;
-  return `<h2>6. 맞춤 메이크업</h2><p class="lead"><b>GPT 한 장 생성</b>(최신 양식처럼 고객 얼굴로 만든 인포그래픽) 또는 <b>자동 템플릿</b>(사진에 색조를 입힌 부위별 가이드, 글자가 또렷함) 중에서 고르세요.</p>
-  <div class="card"><h3>GPT 메이크업 가이드</h3>${G ? `<p class="mut">AI 분석 내용: 핵심 포인트 ${G.core?.length || 0}개 · 섹션 ${G.sections?.length || 0}개</p>` : `<p class="mut">1단계 AI 분석을 먼저 실행하면 더 정확한 내용으로 만들어집니다.</p>`}
+  const mode = t.mode || "guide";
+  return `<h2>6. 맞춤 메이크업</h2><p class="lead">기본은 <b>GPT 그림 + 프로그램 글씨</b> 방식이에요. GPT는 글씨 없이 메이크업을 입힌 사진 1장만 만들고, 부위 사진·번호·설명 글은 프로그램이 또렷한 글꼴로 얹습니다.</p>
+  ${mode === "guide" ? `<div class="card"><h3>GPT 메이크업 사진 (글씨 없음)</h3>
+    ${genButtons(`data-mkg="1"`, t.guideImg && t.guideQ === "low", "pt")}
+    ${t.guideImg && !t.guideLm ? `<div class="status err" style="margin-top:6px">생성된 사진에서 얼굴 인식이 안 돼서 원본 사진으로 표시 중이에요. 다시 생성해 주세요.</div>` : ""}
+    ${(t.guideCands || []).length ? `<div class="thumbs" style="margin-top:8px">${t.guideCands.map((c, j) => `<div class="th"><div style="border:2px solid ${t.guideImg === c.img ? "var(--br)" : "transparent"};height:130px;position:relative"><img src="${BlobCache.get(c.img)}" data-mkgpick="${j}" style="cursor:pointer;object-fit:contain">${qTag(c.q)}</div></div>`).join("")}</div><div class="mut">썸네일을 누르면 그 사진으로 6쪽이 바뀝니다.</div>` : `<p class="mut" style="margin-top:6px">생성 전에는 원본 정면 사진으로 미리 보여 드려요.</p>`}</div>` : ""}
+  <div class="card"><h3>6쪽에 들어갈 글 (AI 분석)</h3>${G ? `<p class="mut">AI 분석 내용: 핵심 포인트 ${G.core?.length || 0}개 · 섹션 ${G.sections?.length || 0}개</p>` : `<p class="mut">1단계 AI 분석을 먼저 실행하면 더 정확한 내용으로 만들어집니다.</p>`}
     ${G ? `${field("texts.makeupGuide.intro", "부제")}${field("texts.makeupGuide.overall", "전체적인 인상과 메이크업 방향", { rows: 3 })}<details><summary>섹션 ${G.sections?.length || 0}개 내용 보기·수정</summary>${(G.sections || []).map((s, i) => `${field(`texts.makeupGuide.sections.${i}.title`, `${i + 1}. 제목`, { input: true })}${field(`texts.makeupGuide.sections.${i}.sub`, "부제", { input: true })}`).join("")}</details>` : ""}
-    <div class="row" style="margin-top:8px"><button class="btn sm pri" id="mkGen">✨ GPT로 메이크업 가이드 생성 (1~2분)</button>${t.fullImage ? `<span class="mut">✓ 생성됨 — 다시 누르면 새로 만듭니다</span>` : ""}</div>
-    ${(t.cands || []).length ? `<div class="thumbs" style="margin-top:8px">${t.cands.map((c, j) => `<div class="th"><div style="border:2px solid ${t.fullImage === c ? "var(--br)" : "transparent"};height:120px"><img src="${BlobCache.get(c)}" data-mkpick="${j}" style="cursor:pointer;object-fit:contain"></div></div>`).join("")}</div>` : ""}</div>
+    ${mode === "image" ? `<div class="row" style="margin-top:8px"><button class="btn sm pri" id="mkGen">✨ GPT 포스터 한 장 생성 (글씨 포함 · 고품질 약 280원)</button>` : `<div class="row" style="display:none">`}${t.fullImage ? `<span class="mut">✓ 생성됨 — 다시 누르면 새로 만듭니다</span>` : ""}</div>
+    ${mode === "image" && (t.cands || []).length ? `<div class="thumbs" style="margin-top:8px">${t.cands.map((c, j) => `<div class="th"><div style="border:2px solid ${t.fullImage === c ? "var(--br)" : "transparent"};height:120px"><img src="${BlobCache.get(c)}" data-mkpick="${j}" style="cursor:pointer;object-fit:contain"></div></div>`).join("")}</div>` : ""}</div>
   ${!st.front.pts ? `<div class="status err">자동 얼굴 인식이 안 된 상태라 부위 사진을 만들 수 없어요. 문장만 작성하거나 아래에서 이미지로 대체하세요.</div>` : ""}
-  <div class="card"><h3>페이지 방식</h3><div class="row"><label><input type="radio" name="mkmode" value="image" ${t.mode !== "template" ? "checked" : ""}> GPT 한 장 (또는 직접 업로드)</label><label><input type="radio" name="mkmode" value="template" ${t.mode === "template" ? "checked" : ""}> 자동 템플릿</label></div>
-    ${t.mode !== "template" ? imgSlot("texts.makeup.fullImage", "직접 만든 이미지 업로드") : ""}</div><h3 style="margin:16px 0 8px">자동 템플릿용 문장</h3>
+  <div class="card"><h3>페이지 방식</h3><div class="row" style="flex-wrap:wrap"><label><input type="radio" name="mkmode" value="guide" ${mode === "guide" ? "checked" : ""}> GPT 그림 + 프로그램 글씨 (추천)</label><label><input type="radio" name="mkmode" value="image" ${mode === "image" ? "checked" : ""}> GPT 포스터 한 장 (또는 직접 업로드)</label><label><input type="radio" name="mkmode" value="template" ${mode === "template" ? "checked" : ""}> 자동 템플릿</label></div>
+    ${mode === "image" ? imgSlot("texts.makeup.fullImage", "직접 만든 이미지 업로드") : ""}</div><h3 style="margin:16px 0 8px">자동 템플릿용 문장</h3>
   <div class="card"><h3>상단</h3>${field("texts.makeup.title", "제목", { input: true })}${field("texts.makeup.head", "헤드 문구")}${field("texts.makeup.intro", "소개 문장")}
     <details><summary>핵심 포인트 8개</summary><div class="grid2">${t.keyPoints.map((x, i) => field(`texts.makeup.keyPoints.${i}`, `${i + 1}`, { input: true })).join("")}</div></details></div>
   ${MAKEUP_ORDER.map((k, n) => { const s = t.sections[k]; const lib = MAKEUP_LIB[k];
@@ -557,7 +587,9 @@ function viewMakeup() {
 }
 POST[6] = E => {
   const g = $("#mkGen", E); if (g) g.onclick = async () => { if (!_aiConsent) { if (!confirm("고객 사진이 OpenAI(GPT 이미지)로 전송됩니다.\n고객에게 동의를 받으셨나요?")) return; _aiConsent = true; }
-    g.disabled = true; g.textContent = "생성 중… (1~2분)"; try { const raw = await generateAIImage("makeup", st, null); const img = await shrinkDataURL(raw, 1600); const t = st.texts.makeup; t.cands = [...(t.cands || []), img].slice(-4); t.fullImage = img; t.mode = "image"; autosave(); renderPreview(); } catch (e) { toast("생성 실패: " + esc(e.message), 7000); } renderEditor(); };
+    g.disabled = true; g.textContent = "생성 중… (1~2분)"; try { const r = await generateAIImage("makeupPoster", st, null, { mode: "final" }); const img = await shrinkDataURL(r.image, 1600); const t = st.texts.makeup; t.cands = [...(t.cands || []), img].slice(-4); t.fullImage = img; t.mode = "image"; autosave(); renderPreview(); } catch (e) { toast("생성 실패: " + esc(e.message), 7000); } renderEditor(); };
+  $$("[data-mkg]", E).forEach(b => b.onclick = () => runMakeupGuide(b, b.dataset.mode));
+  $$("[data-mkgpick]", E).forEach(im => im.onclick = () => { const t = st.texts.makeup; const c = t.guideCands[+im.dataset.mkgpick]; t.guideImg = c.img; t.guideLm = c.lm; t.guideQ = c.q; renderEditor(); renderPreview(); autosave(); });
   $$("[data-mkpick]", E).forEach(im => im.onclick = () => { const t = st.texts.makeup; t.fullImage = t.cands[+im.dataset.mkpick]; t.mode = "image"; renderEditor(); renderPreview(); autosave(); });
   bindImgSlots(E);
   $$("[name=mkmode]", E).forEach(r => r.onchange = () => { st.texts.makeup.mode = r.value; renderEditor(); renderPreview(); autosave(); });
@@ -571,7 +603,7 @@ function viewAcc(kind) {
   const shapes = kind === "g" ? GLASSES_SHAPES : EARRING_SHAPES; const lib = FACE_TYPES[st.type.key][key].items;
   const colors = kind === "g" ? ["silver", "gold", "rosegold", "gunmetal", "brown", "black", "clear", "tortoise"] : ["gold", "silver", "rosegold"];
   return `${kind === "e" ? earEditor() : ""}
-  <div class="card">${field(`texts.${key}.formula`, "한 줄 공식", { input: true })}${field(`texts.${key}.desc`, "설명")}<div class="row" style="margin-top:8px"><button class="btn sm" data-aiall="${key}">✨ 3개 모두 AI 착용 이미지 생성</button><span class="mut">없으면 자동 그림으로 표시됩니다</span></div></div>
+  <div class="card">${field(`texts.${key}.formula`, "한 줄 공식", { input: true })}${field(`texts.${key}.desc`, "설명")}<div class="row" style="margin-top:8px"><button class="btn sm" data-aiall="${key}" data-mode="draft">🧪 3개 시안 (약 ${PRICE_KRW[key === "glasses" ? "sq" : "pt"].low * 3}원)</button><button class="btn sm pri" data-aiall="${key}" data-mode="final">✨ 3개 확정 (약 ${PRICE_KRW[key === "glasses" ? "sq" : "pt"].medium * 3}원)</button><span class="mut">없으면 자동 그림으로 표시됩니다</span></div></div>
   ${t.items.map((it, i) => `<div class="card"><h3>0${i + 1} <span class="tag">${it.useUpload && it.img ? "업로드 이미지 사용 중" : "자동 착용 시뮬레이션"}</span></h3>
     <select data-accpick="${key}:${i}"><option value="">— 추천 후보에서 고르기 —</option>${lib.map((x, j) => `<option value="${j}">${esc(x.name)}</option>`).join("")}</select>
     <div class="grid3"><div><label class="f">모양</label><select data-path="texts.${key}.items.${i}.shape">${Object.entries(shapes).map(([k, n]) => `<option value="${k}" ${it.shape === k ? "selected" : ""}>${n}</option>`).join("")}</select></div>
@@ -611,9 +643,12 @@ POST[8] = E => {
 
 /* ---------- 9. 미리보기·출력 ---------- */
 function viewOutput() {
-  const T = st.texts; const checks = [[!!st.client.name, "고객 이름"], [st.analyzed, "AI 분석"], [T.hair.items.every(i => i.img), "헤어 이미지 3장"], [!!T.makeup.fullImage || T.makeup.mode === "template", "메이크업 가이드"], [T.glasses.items.every(i => i.img && i.useUpload), "안경 이미지 3장"], [T.earrings.items.every(i => i.img && i.useUpload), "귀걸이 이미지 3장"]];
+  const T = st.texts; const checks = [[!!st.client.name, "고객 이름"], [st.analyzed, "AI 분석"], [T.hair.items.every(i => i.img), "헤어 이미지 3장"], [(T.makeup.mode || "guide") === "guide" ? !!(T.makeup.guideImg && T.makeup.guideLm) : (!!T.makeup.fullImage || T.makeup.mode === "template"), "메이크업 가이드"], [T.glasses.items.every(i => i.img && i.useUpload), "안경 이미지 3장"], [T.earrings.items.every(i => i.img && i.useUpload), "귀걸이 이미지 3장"]];
   return `<h2>9. 미리보기·출력</h2><p class="lead">오른쪽에서 8쪽 전체를 확인하세요.</p>
-  <div class="card"><h3>완성 체크</h3>${checks.map(([ok, t]) => `<div style="font-size:13px;margin:4px 0">${ok ? "✅" : "⬜"} ${t}</div>`).join("")}</div>
+  <div class="card"><h3>완성 체크</h3>${checks.map(([ok, t]) => `<div style="font-size:13px;margin:4px 0">${ok ? "✅" : "⬜"} ${t}</div>`).join("")}
+    ${(() => { const lows = [...["hair", "glasses", "earrings"].flatMap(k => T[k].items.map((it, i) => it.img && it.imgQ === "low" ? `${{ hair: "헤어", glasses: "안경", earrings: "귀걸이" }[k]} ${i + 1}` : null)), (T.makeup.mode || "guide") === "guide" && T.makeup.guideImg && T.makeup.guideQ === "low" ? "메이크업 사진" : null].filter(Boolean);
+      return lows.length ? `<div class="status err" style="margin-top:8px">시안(저품질) 이미지가 들어가 있어요: ${lows.join(", ")} — 각 단계에서 '고른 시안을 그대로 확정'을 누르면 고화질로 바뀝니다.</div>` : ""; })()}</div>
+  <div class="card"><h3>이번 보고서 이미지 비용</h3>${(() => { const c = costSummary(st); return c.n ? `<div style="font-size:13px">GPT 이미지 <b>${c.n}회</b> 생성 (시안 ${c.low} · 확정 ${c.medium}${c.high ? ` · 고품질 ${c.high}` : ""}) — 약 <b>${c.krw.toLocaleString()}원</b> <span class="mut">($${c.usd.toFixed(2)})</span></div><div class="mut">OpenAI가 알려 준 사용량 기준 추정치예요. 정확한 청구액은 OpenAI 결제 화면에서 확인하세요.</div>` : `<div class="mut">아직 생성한 이미지가 없어요.</div>`; })()}</div>
   <div class="card"><h3>출력</h3><div class="row"><button class="btn pri" id="doPdf">PDF 다운로드</button><button class="btn" id="doPrint">인쇄 / PDF로 저장</button></div></div>
   <div class="card"><h3>구글 드라이브</h3><p class="mut">'${esc(CFG.driveFolder || "")}' 폴더 안에 ${esc(fileBase())} 폴더를 만들고 PDF·작업파일·사진·AI 이미지를 저장합니다.</p>
     <div class="row"><button class="btn pri" id="dSave">드라이브에 저장</button><button class="btn" id="dList">드라이브에서 불러오기</button></div><div id="dl"></div></div>

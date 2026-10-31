@@ -290,7 +290,7 @@ function generateTexts(st) {
   if (th.balanced) feat.push("균형적인 이목구비");
   if (m.eyes[1] >= 1.05) feat.push("소폭 넓은 미간"); else if (m.eyes[1] <= 0.94) feat.push("좁은 미간");
   out.makeup = {
-    mode: "image", fullImage: null,
+    mode: "guide", fullImage: null, guideImg: null, guideLm: null,
     title: "맞춤 메이크업 가이드", head: MAKEUP_HEAD[st.type.key],
     intro: `${feat.join("과 ")}를 가진 ${T.ko} 얼굴의 특징을 고려하여, 과한 변화 없이 장점을 살리고 전체적인 윤곽과 선명도를 정돈하는 메이크업 방법입니다.`.replace("은과", "과").replace("미간를", "미간을").replace("이목구비를", "이목구비를"),
     keyPoints: [secs.brow.sub, secs.eye.sub.replace("하여 ", " "), secs.nose.sub, secs.blush.sub, secs.contour.sub, secs.lip.sub.replace("하여 자연스러운 벨벳 질감으로 표현", " 벨벳 질감"), secs.skin.sub, mods[0] ? mods[0].makeup[Object.keys(mods[0].makeup)[0]] : "전체적으로 과하지 않은 음영 사용"].slice(0, 8),

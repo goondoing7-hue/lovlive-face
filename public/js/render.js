@@ -198,6 +198,7 @@ function makeupHeaderPhoto(st) {
 }
 function pageMakeup(st) {
   const t = st.texts.makeup;
+  if (t.mode !== "template" && t.mode !== "image") return pageMakeupGuide(st);
   if (t.mode !== "template") return t.fullImage ? `<section class="page p6 full"><img src="${BlobCache.get(t.fullImage)}" alt=""></section>` : `<section class="page p6"><div class="ph-empty" style="position:absolute;inset:40px">메이크업 가이드 — 6단계에서 GPT로 생성하거나 템플릿 방식을 고르세요</div></section>`;
   const F = st.photos.front;
   const sec = (k, n, compact) => {
@@ -319,4 +320,4 @@ function pageAccessory(st, kind) {
 
 const PAGE_FUNCS = [pageCover, pageBalance, pageFront, pageSide, pageHair, pageMakeup, st => pageAccessory(st, "g"), st => pageAccessory(st, "e")];
 const PAGE_NAMES = ["표지", "페이스 밸런스", "정면 비율", "측면 비율", "헤어 BEST 3", "맞춤 메이크업", "안경", "귀걸이"];
-function renderPage(st, i) { try { return PAGE_FUNCS[i](st); } catch (e) { console.error(e); return `<section class="page"><div class="err">페이지 ${i + 1} 렌더링 오류: ${esc(e.message)}</div></section>`; } }
+function renderPage(st, i) { try { return PAGE_FUNCS[i](st); } catch (e) { console.error(e); return `<section class="page"><div class="page-err">페이지 ${i + 1} 렌더링 오류: ${esc(e.message)}</div></section>`; } }

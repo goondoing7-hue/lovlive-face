@@ -61,13 +61,40 @@ ${lines}
 Photorealistic makeup applied subtly and correctly on her real features. Portrait 2:3, high resolution, sharp legible Korean typography.`;
 }
 
-/** 서버 호출 */
-async function generateAIImage(kind, st, item) {
-  let images = [], size = "1024x1536", quality = "medium";
-  if (kind === "makeup") { images = [await toJpeg(st.photos.frontOrig || st.photos.front, 1024)]; quality = "high"; }
-  else if (kind === "earrings") { const e = await earCrop(st); if (!e) throw new Error("측면(귀) 사진이 없습니다"); images = [e]; }
-  else { images = [await toJpeg(st.photos.frontOrig || st.photos.front, 1024)]; if (kind === "hair" && item.ref) images.push(await libImage(item.ref)); if (kind === "glasses") size = "1024x1024"; }
-  const prompt = kind === "makeup" ? makeupPrompt(st) : imgPromptFor(kind, st, item);
+/** 6쪽용: 글씨 없이 메이크업만 적용한 정면 사진 (글씨·번호는 프로그램이 얹음) */
+function makeupFacePrompt(st) {
+  const G = st.texts.makeupGuide || {}; const T = st.texts.makeup;
+  const secs = (G.sections && G.sections.length ? G.sections : Object.values(T.sections).map(s => ({ title: s.title, sub: s.sub, steps: s.steps }))).slice(0, 10);
+  const plan = secs.map(s => `- ${s.title}: ${one(s.sub)} (${(s.steps || []).map(one).join(" / ")})`).join("\n");
+  return `Edit this photo of a real customer. Apply the following personalized makeup to HER face, realistically and tastefully (Korean beauty-salon quality, natural finish):
+${plan}
+Overall direction: ${one(G.overall || T.head)}
+Keep the SAME person: identical face shape, features, skin tone and texture, expression. Do not slim or reshape the face.
+Output: straight-on front-facing beauty portrait, eyes open looking at camera, neutral relaxed mouth, hair tucked behind the ears and away from the forehead and cheeks so brows, eyes, nose, cheeks, jawline and lips are fully visible, soft even studio light, plain warm light-ivory background, face centered and filling about 70% of the frame from the top of the forehead to the chin.
+ABSOLUTELY NO text, letters, numbers, labels, arrows, lines, frames or watermark — a clean photo only.`;
+}
+const IMG_COST_KRW = 1400; // 1달러 환산(대략)
+const IMG_Q = { draft: "low", final: "medium" };
+
+/** 서버 호출. opts.mode: "draft"(저품질 시안) | "final"(중간 품질), opts.base: 고화질로 다시 만들 시안 이미지 */
+async function generateAIImage(kind, st, item, opts = {}) {
+  const mode = opts.mode || "final"; const quality = IMG_Q[mode] || "medium";
+  let images = [], size = "1024x1536", prompt;
+  if (kind === "makeup") { images = [await toJpeg(st.photos.frontOrig || st.photos.front, 1024)]; prompt = makeupFacePrompt(st); }
+  else if (kind === "makeupPoster") { images = [await toJpeg(st.photos.frontOrig || st.photos.front, 1024)]; prompt = makeupPrompt(st); }
+  else if (kind === "earrings") { const e = await earCrop(st); if (!e) throw new Error("측면(귀) 사진이 없습니다"); images = [e]; prompt = imgPromptFor(kind, st, item); }
+  else { images = [await toJpeg(st.photos.frontOrig || st.photos.front, 1024)]; if (kind === "hair" && item.ref) images.push(await libImage(item.ref)); if (kind === "glasses" || kind === "hair") size = "1024x1024"; prompt = imgPromptFor(kind, st, item); }
+  if (opts.base) { // 고른 시안을 그대로 고화질로
+    images = [await toJpeg(opts.base, 1024), images[0]];
+    prompt = `Recreate the FIRST image faithfully at higher quality and sharper detail: keep the exact same composition, framing, pose, hairstyle/accessory/makeup design, colors and background. Use the SECOND image only to restore the person's exact facial identity, skin texture and fine details. Change nothing else. No text, no watermark.`;
+  }
   const r = await apiPost("/api/image", { kind, prompt, images, size, quality });
-  return r.image;
+  const usd = r.cost ?? 0;
+  (st.costs = st.costs || []).push({ kind, quality, usd, at: Date.now() });
+  return { image: r.image, quality, usd };
+}
+function costSummary(st) {
+  const L = st.costs || []; const usd = L.reduce((s, c) => s + (c.usd || 0), 0);
+  const by = q => L.filter(c => c.quality === q).length;
+  return { n: L.length, usd, krw: Math.round(usd * IMG_COST_KRW), low: by("low"), medium: by("medium"), high: by("high") };
 }

@@ -134,6 +134,7 @@ function bindFields(root) {
       let val = el.type === "checkbox" ? el.checked : el.type === "range" || el.type === "number" ? +el.value : el.value;
       setPath(st, el.dataset.path, val);
       if (el.dataset.path.startsWith("texts.")) { markEdited(el.dataset.path); el.classList.add("edited"); }
+      if (st.analyzed) onManualChange(el);
       if (el.dataset.cb) CALLBACKS[el.dataset.cb]?.(el);
       schedulePreview(); autosave();
     });
@@ -186,7 +187,7 @@ POST[1] = E => {
   hook("upSide", async f => { const d = await fileToDataURL(f, 1600); const im = await loadImage(d); Object.assign(st.side, { src: d, w: im.width, h: im.height, pts: [null, null, null] }); renderEditor(); renderNav(); autosave(); });
   hook("upEar", async f => { const d = await fileToDataURL(f, 1600); const im = await loadImage(d); Object.assign(st.ear, { src: d, w: im.width, h: im.height, lobe: null }); renderEditor(); renderNav(); autosave(); });
   const se = $("#sideToEar", E); if (se) se.onclick = () => { Object.assign(st.ear, { src: st.side.src, w: st.side.w, h: st.side.h, lobe: null }); toast("측면 사진을 귀 사진으로 지정했어요. 8단계에서 귓불 위치를 찍어 주세요."); renderEditor(); renderNav(); };
-  $$("[data-man]", E).forEach(inp => inp.oninput = () => { st.manual[inp.dataset.man] = inp.value.replace(/\s/g, ""); regenerate(false); schedulePreview(); autosave(); const b = $("#runAna"); if (b) b.disabled = !(st.photos.front && st.side.src && RATIO_IN.every(([k]) => st.manual[k])); });
+  $$("[data-man]", E).forEach(inp => inp.oninput = () => { st.manual[inp.dataset.man] = inp.value.replace(/\s/g, ""); if (st.analyzed) queueRefresh(["ratios"], `${(RATIO_IN.find(r => r[0] === inp.dataset.man) || [])[1]} 비율을 ${st.manual[inp.dataset.man]}(으)로 직접 수정함`, 2500); regenerate(false); schedulePreview(); autosave(); const b = $("#runAna"); if (b) b.disabled = !(st.photos.front && st.side.src && RATIO_IN.every(([k]) => st.manual[k])); });
   $("#shots", E).onchange = async e => { const fs = [...e.target.files]; if (!fs.length) return; busy("캡처에서 비율을 읽는 중…");
     try { const imgs = await Promise.all(fs.map(f => fileToDataURL(f, 1100))); const r = await apiPost("/api/analyze", { task: "ratios", images: imgs });
       const map = { aspect: "aspect", thirds: "thirds", eyeDist: "eyes", eyePos: "eyePos", nosePos: "nosePos", mouthPos: "mouthPos" };
@@ -228,11 +229,67 @@ async function runAnalysis() {
     ["hair", "glasses", "earrings"].forEach(k => (j[k]?.items || []).forEach((x, i) => { const it = st.texts[k].items[i]; if (!it) return; ["prompt", "ref", "shape", "color"].forEach(f => { if (x[f] != null && x[f] !== "") it[f] = x[f]; }); }));
     if (j.makeupGuide) st.texts.makeupGuide = j.makeupGuide;
     const sp = j.sidePoints; if (sp && st.side.w) { const P = k => sp[k] ? [sp[k][0] * st.side.w, sp[k][1] * st.side.h] : null; st.side.pts = [P("noseTip"), P("lip"), P("chin")]; if (sp.ear) st.side.earPt = P("ear"); }
-    st.analyzed = true; markAllEdited(); busy(); toast("분석 완료! 이제 각 단계에서 확인하고 GPT 이미지를 만들어 주세요.", 5000); goStep(3); autosave();
+    st.analyzed = true; st.locked = []; markAllEdited(); busy(); toast("분석 완료! 이제 각 단계에서 확인하고 GPT 이미지를 만들어 주세요.", 5000); goStep(3); autosave();
   } catch (e) { busy(); toast("분석 실패: " + esc(e.message), 8000); }
 }
 /* AI가 쓴 문장은 이후 측정값 변경으로 덮어쓰지 않도록 표시 */
 function markAllEdited() { const walk = (o, p) => { if (Array.isArray(o)) o.forEach((v, i) => walk(v, p + "." + i)); else if (o && typeof o === "object") Object.entries(o).forEach(([k, v]) => { if (!KEEP_KEYS.has(k)) walk(v, p + "." + k); }); else if (typeof o === "string") markEdited(p); }; walk(st.texts, "texts"); }
+
+/* ---------- 수동 선택 → AI 자동 반영 ---------- */
+const SCOPE_KEYS = { all: ["p2", "p3", "hair", "makeup", "makeupGuide", "glasses", "earrings"], ratios: ["p2", "p3", "makeup", "makeupGuide"], side: ["side"], hair: ["hair"], glasses: ["glasses"], earrings: ["earrings"], makeup: ["makeup", "makeupGuide"] };
+let _rq = { scopes: new Set(), notes: [], t: null, running: false };
+function lockSet() { return new Set(st.locked || []); }
+function lock(p) { const s = lockSet(); s.add(p); st.locked = [...s]; }
+function unlock(prefix) { st.locked = (st.locked || []).filter(p => !p.startsWith(prefix)); }
+function markStale(kind, i) { const it = (kind === "hair" ? st.texts.hair : st.texts[kind]).items[i]; if (it && it.img) it.stale = true; }
+/** 직접 입력(타이핑)은 잠금 → AI가 덮어쓰지 않음, 선택(셀렉트·슬라이더)은 AI 반영 대상 */
+function onManualChange(el) {
+  const p = el.dataset.path; if (!p.startsWith("texts.") && !p.startsWith("side.")) return;
+  if (el.tagName === "TEXTAREA" || el.type === "text") { lock(p); return; }
+  const m = p.match(/^texts\.(glasses|earrings)\.(items\.(\d+)\.(shape|color)|scales\.(\d+))$/);
+  if (m) {
+    const k = m[1], ko = k === "glasses" ? "안경" : "귀걸이";
+    if (m[3] != null) { markStale(k, +m[3]); unlock(`texts.${k}.items.${m[3]}`); queueRefresh([k], `${ko} 0${+m[3] + 1}의 ${m[4] === "shape" ? "모양" : "컬러"}을(를) '${el.options[el.selectedIndex].text}'(으)로 직접 선택함 — 이름·설명·이미지 설명을 맞출 것`); }
+    else { const L = (k === "glasses" ? GLASSES_SCALES : EARRING_SCALES)[+m[5]]; unlock(`texts.${k}.scaleText.${m[5]}`); queueRefresh([k], `${ko} DETAIL SCALE '${L[0]}'을(를) ${L[1]}(0)~${L[2]}(4) 중 ${el.value}(으)로 직접 조정함 — 해당 설명 문구를 맞출 것`, 1500); }
+  }
+}
+function queueRefresh(scopes, note, delay = 1200) {
+  if (st.settings.autoRefresh === false) { scopes.forEach(s => _rq.scopes.add(s)); _rq.notes.push(note); refreshBadge(); return; }
+  scopes.forEach(s => _rq.scopes.add(s)); _rq.notes.push(note); refreshBadge("대기");
+  clearTimeout(_rq.t); _rq.t = setTimeout(runRefresh, delay);
+}
+function refreshBadge(state) {
+  let b = $("#rfBadge"); if (!b) return;
+  const n = _rq.notes.length;
+  b.style.display = state || n ? "" : "none";
+  b.innerHTML = state === "대기" ? `✏️ 선택 변경 ${n}건 — 곧 AI가 반영합니다` : state === "run" ? "⏳ 선택 내용을 AI가 반영 중…" : state === "ok" ? "✓ 선택 내용 반영됨" : state === "err" ? "⚠ 반영 실패 — 눌러서 다시 시도" : n ? `✨ 선택 변경 ${n}건 → AI로 반영` : "";
+  b.onclick = () => runRefresh();
+  if (state === "ok") setTimeout(() => { if (!_rq.notes.length) b.style.display = "none"; }, 2500);
+}
+async function runRefresh() {
+  if (_rq.running) { clearTimeout(_rq.t); _rq.t = setTimeout(runRefresh, 800); return; }
+  if (!_rq.notes.length) return;
+  const scopes = [..._rq.scopes], notes = _rq.notes.slice(); _rq.scopes.clear(); _rq.notes = []; _rq.running = true; refreshBadge("run");
+  const keys = [...new Set(scopes.flatMap(s => SCOPE_KEYS[s] || []))];
+  try {
+    const m = roundRatios(effRatios(st));
+    const j = await apiPost("/api/analyze", { task: "refresh", name: st.client.name, memo: st.client.memo, faceType: FACE_TYPES[st.type.key].ko, keys, notes,
+      ratios: { aspect: fmtRatio("aspect", m), thirds: fmtRatio("thirds", m), eyes: fmtRatio("eyes", m), eyePos: fmtRatio("eyePos", m), nosePos: fmtRatio("nosePos", m), mouthPos: fmtRatio("mouthPos", m) },
+      draft: { ...draftForAI(), makeupGuide: st.texts.makeupGuide || null } });
+    applyRefresh(j, keys);
+    refreshBadge("ok"); renderEditor(); renderPreview(); autosave();
+  } catch (e) { scopes.forEach(s => _rq.scopes.add(s)); _rq.notes.unshift(...notes); refreshBadge("err"); toast("AI 반영 실패: " + esc(e.message), 6000); }
+  _rq.running = false;
+}
+function applyRefresh(j, keys) {
+  const locked = lockSet(); const saved = [...locked].map(p => [p, getPath(st, p)]);
+  ["glasses", "earrings"].forEach(k => { if (st.texts[k]?.scales) saved.push([`texts.${k}.scales`, st.texts[k].scales.slice()]); });
+  const part = {}; keys.forEach(k => { if (j[k] != null) part[k] = j[k]; });
+  mergeAI(st, part);
+  ["hair", "glasses", "earrings"].forEach(k => (part[k]?.items || []).forEach((x, i) => { const it = st.texts[k].items[i]; if (!it) return; ["prompt", "ref", "shape", "color"].forEach(f => { if (x[f] != null && x[f] !== "" && !locked.has(`texts.${k}.items.${i}.${f}`)) it[f] = x[f]; }); }));
+  if (part.makeupGuide) st.texts.makeupGuide = part.makeupGuide;
+  saved.forEach(([p, v]) => { if (v !== undefined) setPath(st, p, v); });
+}
 
 /* ---------- 2. 정면 측정 ---------- */
 let activeLine = null, showLm = false;
@@ -375,7 +432,7 @@ POST[3] = E => {
   $$("#typeChips button", E).forEach(b => b.onclick = () => {
     if (b.dataset.k === st.type.key) return;
     if (st.edited.some(p => p.startsWith("texts.")) && !confirm("얼굴형을 바꾸면 직접 고친 문장도 새 얼굴형 기준으로 다시 만들어집니다. 계속할까요? (사진·업로드 이미지는 유지)")) return;
-    st.type.key = b.dataset.k; markEdited("type.key");
+    st.type.key = b.dataset.k; markEdited("type.key"); if (st.analyzed) queueRefresh(["all"], `얼굴형을 '${FACE_TYPES[b.dataset.k].ko}'(으)로 직접 선택함`);
     st.edited = st.edited.filter(p => !p.startsWith("texts.")); regenerate(true); renderEditor(); renderPreview(); autosave();
     toast(`${FACE_TYPES[st.type.key].ko} 기준으로 문장을 새로 만들었어요.`);
   });
@@ -401,7 +458,7 @@ function drawSideSVG() {
     S.pts.map((p, i) => p ? `<circle class="spt" data-i="${i}" cx="${p[0]}" cy="${p[1]}" r="${r}" fill="${PINK}" fill-opacity=".5" stroke="#fff" stroke-width="${r / 4}" style="cursor:move"/>` : "").join("");
 }
 POST[4] = E => {
-  $$("[data-axis]", E).forEach(s => s.onchange = () => { const i = +s.dataset.axis; st.side.sel[i] = +s.value; st.side.axes[i].text = SIDE_AXES[i].options[+s.value].t; const g = generateSide(st.side.sel); st.side.title = g.title; st.side.text = g.text; renderEditor(); schedulePreview(); autosave(); });
+  $$("[data-axis]", E).forEach(s => s.onchange = () => { const i = +s.dataset.axis; st.side.sel[i] = +s.value; st.side.axes[i].text = SIDE_AXES[i].options[+s.value].t; const g = generateSide(st.side.sel); st.side.title = g.title; st.side.text = g.text; if (st.analyzed) queueRefresh(["side"], `측면 '${SIDE_AXES[i].title}'을(를) '${SIDE_AXES[i].options[+s.value].t.replace(/\n/g, " ")}'(으)로 직접 선택함`); renderEditor(); schedulePreview(); autosave(); });
   $("#sideRegen", E).onclick = () => { Object.assign(st.side, generateSide(st.side.sel)); renderEditor(); schedulePreview(); };
   if (!st.side.src) return;
   drawSideSVG(); const svg = $("#ssvg"); let drag = null;
@@ -431,7 +488,7 @@ function bindImgSlots(E) {
 /* ---------- AI 이미지 생성 블록 ---------- */
 function aiBlock(kind, i) {
   const item = (kind === "hair" ? st.texts.hair : st.texts[kind]).items[i]; const cands = item.cands || [];
-  return `<div class="aiblk">${field(`texts.${kind === "hair" ? "hair" : kind}.items.${i}.prompt`, "이미지 생성 설명 (AI가 작성, 수정 가능)", { rows: 2 })}<div class="row" style="margin-top:6px"><button class="btn sm pri" data-ai="${kind}:${i}">✨ GPT로 이미지 생성 (20~60초)</button><span class="mut">여러 번 만들어 마음에 드는 것을 고르세요</span></div>
+  return `<div class="aiblk">${item.stale && item.img ? `<div class="status err" style="margin:0 0 6px">선택이 바뀌었어요 — 이미지를 다시 생성하는 것을 권장합니다</div>` : ""}${field(`texts.${kind === "hair" ? "hair" : kind}.items.${i}.prompt`, "이미지 생성 설명 (AI가 작성, 수정 가능)", { rows: 2 })}<div class="row" style="margin-top:6px"><button class="btn sm pri" data-ai="${kind}:${i}">✨ GPT로 이미지 생성 (20~60초)</button><span class="mut">여러 번 만들어 마음에 드는 것을 고르세요</span></div>
     ${cands.length ? `<div class="thumbs" style="margin-top:8px">${cands.map((c, j) => `<div class="th"><div style="border:2px solid ${item.img === c ? "var(--br)" : "transparent"}"><img src="${BlobCache.get(c)}" data-pick="${kind}:${i}:${j}" style="cursor:pointer"></div><button class="btn sm ghost" data-candel="${kind}:${i}:${j}">삭제</button></div>`).join("")}</div><div class="mut">썸네일을 클릭하면 보고서에 사용됩니다.</div>` : ""}</div>`;
 }
 let _aiConsent = false;
@@ -441,7 +498,7 @@ async function runAI(kind, i, btn) {
   if (btn) { btn.disabled = true; btn.textContent = "생성 중… (20~60초)"; }
   try {
     const raw = await generateAIImage(kind, st, item); const img = await shrinkDataURL(raw, 1100);
-    item.cands = [...(item.cands || []), img].slice(-6);
+    item.cands = [...(item.cands || []), img].slice(-6); item.stale = false;
     if (!item.img || kind === "hair" || !item.useUpload) { item.img = img; if (kind !== "hair") item.useUpload = true; }
     autosave(); renderPreview(); renderNav();
   } catch (e) { console.error(e); toast("AI 생성 실패: " + esc(e.message), 6000); }
@@ -472,10 +529,10 @@ function viewHair() {
 POST[5] = E => {
   bindImgSlots(E); bindAI(E);
   const lib = FACE_TYPES[st.type.key].hair.items, others = POST[5].others || [];
-  $$("[data-href]", E).forEach(d => d.onclick = () => { const [i, id] = d.dataset.href.split(":"); st.texts.hair.items[+i].ref = id; renderEditor(); autosave(); });
+  $$("[data-href]", E).forEach(d => d.onclick = () => { const [i, id] = d.dataset.href.split(":"); st.texts.hair.items[+i].ref = id; markStale("hair", +i); const h = HAIR_LIB.find(x => x.id === id); if (st.analyzed && h) queueRefresh(["hair"], `헤어 BEST ${+i + 1}의 참고 사진을 '${h.name}'(으)로 직접 선택함 — 이름·설명·이미지 설명을 이 스타일 기준으로 맞출 것`); renderEditor(); autosave(); });
   $$("[data-hrefclr]", E).forEach(b => b.onclick = () => { st.texts.hair.items[+b.dataset.hrefclr].ref = ""; renderEditor(); autosave(); });
   $$("[data-hairpick]", E).forEach(s => s.onchange = () => { if (!s.value) return; const i = +s.dataset.hairpick; const x = s.value[0] === "a" ? lib[+s.value.slice(1)] : others[+s.value.slice(1)];
-    st.texts.hair.items[i].name = x.name; st.texts.hair.items[i].desc = x.desc; markEdited(`texts.hair.items.${i}.name`); markEdited(`texts.hair.items.${i}.desc`); renderEditor(); schedulePreview(); autosave(); });
+    st.texts.hair.items[i].name = x.name; st.texts.hair.items[i].desc = x.desc; markEdited(`texts.hair.items.${i}.name`); markEdited(`texts.hair.items.${i}.desc`); unlock(`texts.hair.items.${i}`); markStale("hair", i); if (st.analyzed) queueRefresh(["hair"], `헤어 BEST ${i + 1}을(를) '${x.name.replace(/\n/g, " ")}'(으)로 직접 선택함 (이 항목의 설명·이미지 설명을 이 스타일에 맞게 다시 쓸 것)`); renderEditor(); schedulePreview(); autosave(); });
 };
 
 /* ---------- 6. 메이크업 ---------- */
@@ -505,7 +562,7 @@ POST[6] = E => {
   bindImgSlots(E);
   $$("[name=mkmode]", E).forEach(r => r.onchange = () => { st.texts.makeup.mode = r.value; renderEditor(); renderPreview(); autosave(); });
   $$("[data-mkvar]", E).forEach(s => s.onchange = () => { const k = s.dataset.mkvar; const v = MAKEUP_LIB[k].variants[s.value]; const sec = st.texts.makeup.sections[k];
-    sec.variant = s.value; sec.sub = v.sub; sec.steps = v.steps.slice(); sec.points = v.points.slice(); markEdited(`texts.makeup.sections.${k}.variant`); renderEditor(); schedulePreview(); autosave(); });
+    sec.variant = s.value; sec.sub = v.sub; sec.steps = v.steps.slice(); sec.points = v.points.slice(); unlock(`texts.makeup.sections.${k}`); if (st.analyzed) queueRefresh(["makeup"], `메이크업 '${MAKEUP_LIB[k].title}' 스타일을 '${v.sub}'(으)로 직접 선택함`); markEdited(`texts.makeup.sections.${k}.variant`); renderEditor(); schedulePreview(); autosave(); });
 };
 
 /* ---------- 7·8. 액세서리 ---------- */
@@ -542,7 +599,7 @@ function drawEarSVG() {
 function postAcc(E, key) {
   bindImgSlots(E); bindAI(E);
   $$("[data-accpick]", E).forEach(s => s.onchange = () => { if (s.value === "") return; const [k, i] = s.dataset.accpick.split(":"); const x = FACE_TYPES[st.type.key][k].items[+s.value];
-    Object.assign(st.texts[k].items[+i], { shape: x.shape, name: x.name, desc: x.desc }); ["shape", "name", "desc"].forEach(f => markEdited(`texts.${k}.items.${i}.${f}`)); renderEditor(); schedulePreview(); autosave(); });
+    Object.assign(st.texts[k].items[+i], { shape: x.shape, name: x.name, desc: x.desc }); ["shape", "name", "desc"].forEach(f => markEdited(`texts.${k}.items.${i}.${f}`)); unlock(`texts.${k}.items.${i}`); markStale(k, +i); if (st.analyzed) queueRefresh([k], `${k === "glasses" ? "안경" : "귀걸이"} 0${+i + 1}을(를) '${x.name}'(으)로 직접 선택함`); renderEditor(); schedulePreview(); autosave(); });
   $$("select[data-path$='.shape'], select[data-path$='.color']", E).forEach(s => s.addEventListener("change", () => renderEditor()));
   $$("input[type=range][data-path$='.size']", E).forEach(s => s.addEventListener("input", () => { s.previousElementSibling.textContent = "크기 " + (+s.value).toFixed(2); }));
 }
@@ -625,6 +682,7 @@ function openSettings() {
   const calibRows = Object.keys(DEFAULT_SETTINGS.calib).map(k => `<tr><td>${k}</td><td><input type="number" step="0.01" data-s="calib.${k}.0" value="${S.calib[k][0]}"></td><td><input type="number" step="0.01" data-s="calib.${k}.1" value="${S.calib[k][1]}"></td></tr>`).join("");
   const th = S.thresholds;
   m.innerHTML = `<div class="box"><h2>설정</h2>
+  <div class="card"><h3>수동 선택 반영</h3><label class="mut"><input type="checkbox" id="autoRf" ${st.settings.autoRefresh !== false ? "checked" : ""}> 얼굴형·측면·헤어·안경·귀걸이·메이크업·비율을 직접 바꾸면 관련 문장을 AI가 자동으로 다시 씁니다 (끄면 상단 버튼을 눌러 한 번에 반영)</label><p class="mut">직접 타이핑해서 고친 문장은 AI가 덮어쓰지 않습니다.</p></div>
   <div class="card"><h3>보고서</h3><label class="f">머리말 브랜드 문구</label><input type="text" data-s="brand" value="${esc(S.brand)}"></div>
   <div class="card"><h3>측정 보정 <span class="tag">보정값 = a × 자동값 + b</span></h3><p class="mut">기존 보고서 13건 + 2단계에서 저장한 수동값(현재 ${getCalibSamples().length}건)을 합쳐 계수를 계산합니다. 데이터가 쌓일수록 하영님 측정 기준에 가까워집니다.</p>
     <table class="mtable"><tr><th>항목</th><th>a</th><th>b</th></tr>${calibRows}</table>
@@ -637,6 +695,7 @@ function openSettings() {
   $("#resetCal", m).onclick = () => { S.calib = clone(DEFAULT_SETTINGS.calib); saveSettings(); updateRatios(); m.remove(); openSettings(); };
   $("#expCal", m).onclick = () => download("럽리브_측정보정데이터.json", JSON.stringify(getCalibSamples()));
   $("#impCal", m).onchange = e => { const f = e.target.files[0]; if (!f) return; const r = new FileReader(); r.onload = () => { try { const arr = JSON.parse(r.result); localStorage.setItem("lovive_calib", JSON.stringify([...getCalibSamples(), ...arr])); toast(`${arr.length}건을 가져왔어요.`); m.remove(); openSettings(); } catch (er) { alert(er.message); } }; r.readAsText(f); };
+  $("#autoRf", m).onchange = e => { st.settings.autoRefresh = e.target.checked; saveSettings(); if (e.target.checked && _rq.notes.length) runRefresh(); };
   $("#setOk", m).onclick = () => { m.remove(); renderEditor(); renderPreview(); };
 }
 
@@ -666,7 +725,7 @@ async function init() {
   if (window.__inited) return; window.__inited = true;
   document.body.innerHTML = `<div id="app"><div class="topbar"><img class="logo" src="${LOGO}" alt=""><div class="ttl">페이스 분석결과지<small>AI 분석 · GPT 이미지 · 8쪽</small></div>
     <button class="btn" id="tbNew">새 고객</button><label class="btn">불러오기<input type="file" id="tbLoad" accept=".json" style="display:none"></label><button class="btn" id="tbSave">저장</button>
-    <span class="mut" style="font-size:12px">${esc(AUTH.email || "")}</span><button class="btn" id="tbSet">설정</button><button class="btn" onclick="logout()">로그아웃</button></div>
+    <button class="btn sm" id="rfBadge" style="display:none;background:#fff7e6;border-color:#f0c36d"></button><span class="mut" style="font-size:12px">${esc(AUTH.email || "")}</span><button class="btn" id="tbSet">설정</button><button class="btn" onclick="logout()">로그아웃</button></div>
     <div class="main"><div class="nav"></div><div class="editor"></div><div class="preview"><div class="ptabs"></div><div class="pscroll"></div></div></div></div><div id="printArea"></div>`;
   $("#tbNew").onclick = () => { if (!confirm("새 고객 작업을 시작할까요? (현재 작업은 '저장'으로 파일을 남겨 두세요)")) return; st = newState(); goStep(1); autosave(); };
   $("#tbLoad").onchange = e => { if (e.target.files[0]) loadProjectFile(e.target.files[0]); e.target.value = ""; };

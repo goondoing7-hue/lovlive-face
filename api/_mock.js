@@ -25,3 +25,13 @@ export function mockReport(body) {
     sections: ["눈썹 메이크업", "아이섀도우", "아이라인", "언더 메이크업", "속눈썹 메이크업", "코 메이크업", "블러셔", "윤곽 셰이딩", "립 메이크업", "피부 표현"].map(t => ({ title: t, sub: "(예시) " + t + " 부제", steps: ["단계 1", "단계 2", "단계 3"] })) };
   return d;
 }
+export function mockRefresh(body, keys) {
+  const d = JSON.parse(JSON.stringify(body.draft || {})), out = {};
+  const tag = "(반영) ";
+  keys.forEach(k => { if (d[k] == null) return; out[k] = d[k]; });
+  if (out.p2) out.p2.keyText = tag + (body.notes || []).join(" / ") + "\n" + String(out.p2.keyText || "").split("\n").slice(-1)[0];
+  if (out.p3) out.p3.text = tag + (out.p3.text || "");
+  if (out.side) out.side.text = tag + (body.notes || [])[0];
+  ["hair", "glasses", "earrings"].forEach(k => { if (out[k]?.items) out[k].items.forEach(it => { if (typeof it.desc === "string" && !it.desc.startsWith(tag)) it.desc = tag + it.desc; }); });
+  return out;
+}

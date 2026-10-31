@@ -1,5 +1,5 @@
 import { send, readBody, requireUser, loadKB, callAnalysis, imgPart, parseOrRepair } from "./_lib.js";
-import { mockRatios, mockReport } from "./_mock.js";
+import { mockRatios, mockReport, mockRefresh } from "./_mock.js";
 
 const EXTRA = `추가로 아래 키도 함께 출력하라:
 "faceTypeKey": "oval|round|long|heart|square|hexagon|diamond" 중 하나 (긴 하트형처럼 복합형이면 가장 가까운 기본형, 라벨 문구 p2.chip1에는 'LONG HEART SHAPE : 긴 하트형'처럼 복합형으로 써도 된다),
@@ -56,6 +56,37 @@ ${EXTRA}
 [현재 초안]
 ${JSON.stringify(body.draft || {})}` });
       const text = await callAnalysis({ system, content, maxTokens: 12000 });
+      return send(res, 200, await parseOrRepair(text));
+    }
+    if (body.task === "refresh") {
+      const keys = (body.keys || []).filter(k => ["p2", "p3", "side", "hair", "makeup", "makeupGuide", "glasses", "earrings"].includes(k));
+      if (!keys.length) return send(res, 200, {});
+      if (process.env.MOCK_AI === "1") return send(res, 200, mockRefresh(body, keys));
+      const kb = loadKB();
+      const system = `${kb.knowledge}\n\n${kb.gold}`;
+      const draft = body.draft || {}, part = {};
+      keys.forEach(k => { if (draft[k] != null) part[k] = draft[k]; });
+      const content = [{ type: "text", text: `고객: ${body.name || "고객"} / 얼굴형: ${body.faceType || "-"}
+측정 비율(숫자는 바꾸지 말 것): 종횡비 ${body.ratios?.aspect} / 상:중:하 ${body.ratios?.thirds} / 눈 너비 ${body.ratios?.eyes} / 눈 위치 ${body.ratios?.eyePos} / 코 위치 ${body.ratios?.nosePos} / 입 위치 ${body.ratios?.mouthPos}
+
+상담사가 보고서에서 아래 항목을 직접 선택·수정했다. 이 선택은 확정된 사실이다:
+${(body.notes || []).map(n => "- " + n).join("\n")}
+
+[전체 보고서 현재 상태 — 참고용]
+${JSON.stringify(draft).slice(0, 14000)}
+
+[다시 쓸 부분]
+${JSON.stringify(part)}
+
+지시:
+- 위 선택이 반영되도록 [다시 쓸 부분]의 해석·설명 문장을 고쳐 써라. 선택과 어긋나는 문장, 앞뒤가 안 맞는 문장을 바로잡는다.
+- 선택된 값(얼굴형, 아이템 이름, shape/color, 스케일 값, 메이크업 부제)은 바꾸지 말고 그것에 맞춰 문장을 쓴다.
+- 이미지가 있는 아이템의 prompt(영문 이미지 설명)도 바뀐 선택에 맞게 고친다.
+- 비어 있거나 'AI 분석 후 채워집니다' 같은 자리표시 문장은 반드시 이 고객에 맞게 채운다. 얼굴형이 바뀐 경우 p2(라벨·요약·이마/광대/옆턱/턱끝·STYLE KEY)를 새 얼굴형 기준으로 전부 다시 쓴다.
+- 그 밖에 선택과 무관한 문장은 그대로 둬도 된다. 같은 키 구조, 배열 길이, 줄바꿈 개수를 유지(고정 지면).
+- 키는 ${keys.join(", ")} 만 포함. 기준 보고서와 같은 문체.
+출력은 JSON 하나만. 주석 금지. 문장 안에는 큰따옴표 대신 작은따옴표 사용.` }];
+      const text = await callAnalysis({ system, content, maxTokens: 8000 });
       return send(res, 200, await parseOrRepair(text));
     }
     return send(res, 400, { error: "unknown task" });

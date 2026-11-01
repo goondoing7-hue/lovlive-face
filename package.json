@@ -4,7 +4,10 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "node dev/server.mjs"
+    "build": "node dev/prepare-hair.mjs",
+    "predev": "npm run build",
+    "dev": "node dev/server.mjs",
+    "test": "node --test"
   },
   "dependencies": {
     "google-auth-library": "^9.15.0",

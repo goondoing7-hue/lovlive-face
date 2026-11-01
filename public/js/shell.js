@@ -2,6 +2,7 @@
    로그인(구글, 허용 2계정) · 서버 API · 구글 드라이브 · PDF
    ===================================================================== */
 let CFG = {}, AUTH = { token: null, email: null, exp: 0 }, DRIVE = { token: null, exp: 0 };
+let activeAIRequests = 0;
 function decodeJwt(t) { const p = t.split(".")[1].replace(/-/g, "+").replace(/_/g, "/"); return JSON.parse(decodeURIComponent(escape(atob(p)))); }
 async function boot() {
   CFG = await (await fetch("/api/config")).json();
@@ -28,11 +29,15 @@ function onCredential(r) {
 function logout() { sessionStorage.removeItem("lv_auth"); try { google.accounts.id.disableAutoSelect(); } catch (e) {} location.reload(); }
 async function apiPost(url, body) {
   if (!CFG.devNoAuth && AUTH.exp * 1000 < Date.now() + 30000) { showLogin("로그인 시간이 지났습니다. 다시 로그인한 뒤 버튼을 한 번 더 눌러 주세요."); throw new Error("다시 로그인이 필요합니다"); }
+  const isAI = url === "/api/image" || url === "/api/analyze";
+  if (isAI) activeAIRequests++;
+  try {
   const r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer " + (AUTH.token || "dev") }, body: JSON.stringify(body) });
   let j; try { j = await r.json(); } catch (e) { j = { error: r.status === 504 ? "시간 초과(504) — Vercel 함수 시간 제한을 확인해 주세요" : r.status === 413 ? "사진 용량이 너무 큽니다(413)" : "서버 응답 오류 " + r.status }; }
   if (r.status === 401) { showLogin(j.error); throw new Error(j.error); }
-  if (!r.ok) throw new Error(j.error || "오류 " + r.status);
+  if (!r.ok) throw Object.assign(new Error(j.error || "오류 " + r.status), { status: r.status });
   return j;
+  } finally { if (isAI) activeAIRequests--; }
 }
 function busy(msg) { let b = document.querySelector(".busy"); if (!msg) { b && b.remove(); return; } if (!b) { b = document.createElement("div"); b.className = "busy"; document.body.appendChild(b); } b.textContent = msg; }
 

@@ -63,6 +63,7 @@ function regenerate(force = false, only = null) {
   if (!st.texts) st.texts = fresh;
   for (const sec of Object.keys(fresh)) { if (only && !only.includes(sec)) continue; if (!st.texts[sec]) st.texts[sec] = {}; walk(st.texts[sec], fresh[sec], sec); }
   if (force) st.edited = st.edited.filter(p => !p.startsWith("texts.") || (only && !only.some(o => p.startsWith("texts." + o))));
+  ["glasses", "earrings"].forEach(k => { if (st.texts[k].scaleAuto) syncAccessoryScales(k); });
 }
 
 /* ---- 측정값 갱신 ---- */
@@ -113,12 +114,13 @@ async function analyzeFront(statusEl) {
 function renderNav() {
   const done = { 1: !!st.photos.front, 2: st.front.auto || isEdited("front.lines"), 3: true, 4: !!st.side.src, 5: st.texts.hair.items.some(i => i.img), 6: true, 7: true, 8: !!st.ear.src };
   $(".nav").innerHTML = STEPS.map(s => `<div class="step ${st.step === s.n ? "on" : ""}" data-step="${s.n}"><span class="n">${s.n}</span>${s.t}${done[s.n] && s.n < 9 ? '<span class="ok">●</span>' : ""}</div>`).join("") +
-    `<div class="hint">· 모든 문장 칸은 직접 고칠 수 있어요. 고친 칸(주황 표시)은 자동 갱신에서 제외됩니다.<br>· 작업 내용은 이 브라우저에 자동 저장됩니다.<br>· 완성 후 '미리보기·출력'에서 PDF로 저장하세요.</div>`;
+    `<div class="hint">· 모든 문장 칸은 직접 고칠 수 있어요. 고친 칸(주황 표시)은 자동 갱신에서 제외됩니다.<br>· 이 브라우저에는 자동 저장됩니다. 다른 PC·계정에서 이어서 작업하려면 상단 '임시저장'을 누르세요.<br>· 저장한 작업은 '저장소'에서 다시 열 수 있습니다.</div>`;
   $$(".nav .step").forEach(el => el.onclick = () => goStep(+el.dataset.step));
 }
 function goStep(n) {
   st.step = n; const s = STEPS.find(x => x.n === n); if (s.page >= 0) previewPage = s.page;
   renderNav(); renderEditor(); renderPreview(); $(".editor").scrollTop = 0;
+  autosave({ quiet: true });
 }
 function field(path, label, opts = {}) {
   const v = getPath(st, path) ?? "";
@@ -134,6 +136,10 @@ function bindFields(root) {
       let val = el.type === "checkbox" ? el.checked : el.type === "range" || el.type === "number" ? +el.value : el.value;
       setPath(st, el.dataset.path, val);
       if (el.dataset.path.startsWith("texts.")) { markEdited(el.dataset.path); el.classList.add("edited"); }
+      const scale = el.dataset.path.match(/^texts\.(glasses|earrings)\.(scales|scaleText)\.(\d+)$/);
+      if (scale) { AccessoryScales.markManual(st.texts[scale[1]], +scale[3], scale[2] === "scales" ? "value" : "text"); syncAccessoryScales(scale[1]); st.texts[scale[1]].items.forEach((_, i) => markStale(scale[1], i)); }
+      const accessory = el.dataset.path.match(/^texts\.(glasses|earrings)\.items\.\d+\.(shape|color|size)$/);
+      if (accessory) { syncAccessoryScales(accessory[1]); markStale(accessory[1], +el.dataset.path.split(".")[3]); }
       if (st.analyzed) onManualChange(el);
       if (el.dataset.cb) CALLBACKS[el.dataset.cb]?.(el);
       schedulePreview(); autosave();
@@ -246,11 +252,11 @@ function markStale(kind, i) { const it = (kind === "hair" ? st.texts.hair : st.t
 function onManualChange(el) {
   const p = el.dataset.path; if (!p.startsWith("texts.") && !p.startsWith("side.")) return;
   if (el.tagName === "TEXTAREA" || el.type === "text") { lock(p); return; }
-  const m = p.match(/^texts\.(glasses|earrings)\.(items\.(\d+)\.(shape|color)|scales\.(\d+))$/);
+  const m = p.match(/^texts\.(glasses|earrings)\.(items\.(\d+)\.(shape|color|size)|scales\.(\d+))$/);
   if (m) {
     const k = m[1], ko = k === "glasses" ? "안경" : "귀걸이";
-    if (m[3] != null) { markStale(k, +m[3]); unlock(`texts.${k}.items.${m[3]}`); queueRefresh([k], `${ko} 0${+m[3] + 1}의 ${m[4] === "shape" ? "모양" : "컬러"}을(를) '${el.options[el.selectedIndex].text}'(으)로 직접 선택함 — 이름·설명·이미지 설명을 맞출 것`); }
-    else { const L = (k === "glasses" ? GLASSES_SCALES : EARRING_SCALES)[+m[5]]; unlock(`texts.${k}.scaleText.${m[5]}`); queueRefresh([k], `${ko} DETAIL SCALE '${L[0]}'을(를) ${L[1]}(0)~${L[2]}(4) 중 ${el.value}(으)로 직접 조정함 — 해당 설명 문구를 맞출 것`, 1500); }
+    if (m[3] != null) { markStale(k, +m[3]); const prefix = `texts.${k}.items.${m[3]}`; unlock(prefix); ["shape", "color", "size"].forEach(f => lock(`${prefix}.${f}`)); const label = m[4] === "size" ? "크기" : m[4] === "shape" ? "모양" : "컬러"; const value = m[4] === "size" ? el.value : el.options[el.selectedIndex].text; queueRefresh([k], `${ko} 0${+m[3] + 1}의 ${label}을(를) '${value}'(으)로 직접 선택함 — 이름·설명·이미지 설명을 맞출 것`); }
+    else { const axis = +m[5], L = (k === "glasses" ? GLASSES_SCALES : EARRING_SCALES)[axis], textPath = `texts.${k}.scaleText.${axis}`; const manualText = st.texts[k].manualScaleText?.[axis] || lockSet().has(textPath); if (manualText) lock(textPath); else unlock(textPath); queueRefresh([k], `${ko} DETAIL SCALE '${L[0]}'을(를) ${L[1]}(0)~${L[2]}(4) 중 ${el.value}(으)로 직접 조정함 — ${manualText ? "직접 작성한 설명은 유지할 것" : "해당 설명 문구를 맞출 것"}`, 1500); }
   }
 }
 function queueRefresh(scopes, note, delay = 1200) {
@@ -289,6 +295,16 @@ function applyRefresh(j, keys) {
   ["hair", "glasses", "earrings"].forEach(k => (part[k]?.items || []).forEach((x, i) => { const it = st.texts[k].items[i]; if (!it) return; ["prompt", "ref", "shape", "color"].forEach(f => { if (x[f] != null && x[f] !== "" && !locked.has(`texts.${k}.items.${i}.${f}`)) it[f] = x[f]; }); }));
   if (part.makeupGuide) st.texts.makeupGuide = part.makeupGuide;
   saved.forEach(([p, v]) => { if (v !== undefined) setPath(st, p, v); });
+  ["glasses", "earrings"].forEach(k => { if (st.texts[k].scaleAuto) syncAccessoryScales(k); });
+}
+
+function syncAccessoryScales(kind) {
+  const manualIndices = (st.edited || []).map(p => p.match(new RegExp(`^texts\\.${kind}\\.scales\\.(\\d+)$`))).filter(Boolean).map(m => +m[1]);
+  const manualTextIndices = (st.locked || []).map(p => p.match(new RegExp(`^texts\\.${kind}\\.scaleText\\.(\\d+)$`))).filter(Boolean).map(m => +m[1]);
+  const section = st.texts[kind]; section.scaleAuto = true;
+  AccessoryScales.recompute(kind, section, FACE_TYPES[st.type.key][kind], { manualIndices, manualTextIndices });
+  section.scales.forEach((value, i) => { const el = $(`[data-path="texts.${kind}.scales.${i}"]`); if (el) el.value = value; });
+  section.scaleText.forEach((value, i) => { const el = $(`[data-path="texts.${kind}.scaleText.${i}"]`); if (el) el.value = value; });
 }
 
 /* ---------- 2. 정면 측정 ---------- */
@@ -505,13 +521,25 @@ async function runAI(kind, i, btn, mode = "final") {
   const base = mode === "upgrade" && item.img && item.imgQ === "low" ? item.img : null;
   if (mode === "upgrade" && !base) mode = "final";
   if (btn) { btn.disabled = true; btn.textContent = "생성 중… (20~60초)"; }
+  const targetState = st, previousImage = item.img;
+  const designSignature = () => JSON.stringify({
+    prompt: imgPromptFor(kind, targetState, item), ref: item.ref || "",
+    source: kind === "earrings" ? targetState.ear.src || targetState.side.src : targetState.photos.frontOrig || targetState.photos.front,
+    ear: kind === "earrings" ? { lobe: targetState.ear.lobe, sidePoint: targetState.side.earPt, zoom: targetState.ear.zoom, width: targetState.ear.w, height: targetState.ear.h } : null,
+  });
+  activeAIRequests++;
   try {
-    const r = await generateAIImage(kind, st, item, { mode: mode === "draft" ? "draft" : "final", base }); const img = await shrinkDataURL(r.image, 1100);
+    const requestedDesign = designSignature();
+    const r = await generateAIImage(kind, targetState, item, { mode: mode === "draft" ? "draft" : "final", base }); const img = await shrinkDataURL(r.image, 1100);
+    if (st !== targetState || targetState.texts[kind].items[i] !== item) return;
+    const changed = requestedDesign !== designSignature() || item.img !== previousImage;
     const cq = (item.candQ || []).slice(-(item.cands || []).length); item.cands = [...(item.cands || []), img]; item.candQ = [...cq, r.quality];
     if (item.cands.length > 6) { item.cands = item.cands.slice(-6); item.candQ = item.candQ.slice(-6); }
-    item.stale = false; item.img = img; item.imgQ = r.quality; if (kind !== "hair") item.useUpload = true;
+    if (changed) { item.stale = true; toast("선택이 바뀌어 생성 결과는 후보에 보관했어요. 현재 사진은 유지합니다.", 5000); }
+    else { item.stale = false; item.img = img; item.imgQ = r.quality; if (kind !== "hair") item.useUpload = true; }
     autosave(); renderPreview(); renderNav();
   } catch (e) { console.error(e); toast("AI 생성 실패: " + esc(e.message), 6000); }
+  finally { activeAIRequests--; }
   if (st.step === (kind === "hair" ? 5 : kind === "glasses" ? 7 : 8)) renderEditor();
 }
 function bindAI(E) {
@@ -527,9 +555,9 @@ function viewHair() {
   const others = FACE_TYPE_KEYS.filter(k => k !== st.type.key).flatMap(k => FACE_TYPES[k].hair.items.map(x => ({ ...x, from: FACE_TYPES[k].ko })));
   return `<h2>5. 헤어 BEST 3</h2><p class="lead">고객 정면 사진으로 GPT가 헤어스타일을 입힌 사진을 만듭니다. 기존 보고서의 헤어 사진(${HAIR_LIB.length}장)을 '참고 사진'으로 고르면 그 스타일을 더 정확하게 따라 합니다.</p>
   <div class="card">${field("texts.hair.keywords", "키워드 (굵은 글씨)", { input: true })}${field("texts.hair.desc", "설명 2줄")}<div class="row" style="margin-top:8px"><button class="btn sm" data-aiall="hair" data-mode="draft">🧪 헤어 3개 시안 (약 ${PRICE_KRW.sq.low * 3}원)</button><button class="btn sm pri" data-aiall="hair" data-mode="final">✨ 헤어 3개 확정 (약 ${PRICE_KRW.sq.medium * 3}원)</button></div><div class="mut">'확정'은 시안을 고른 칸은 그 시안을 그대로 고화질로, 나머지는 새로 만듭니다.</div></div>
-  ${t.items.map((it, i) => `<div class="card"><h3>BEST 0${i + 1}</h3><select data-hairpick="${i}"><option value="">— 추천 후보에서 고르기 —</option><optgroup label="${FACE_TYPES[st.type.key].ko} 추천">${lib.map((x, j) => `<option value="a${j}">${esc(x.name.replace(/\n/g, " "))}</option>`).join("")}</optgroup><optgroup label="다른 얼굴형 후보">${others.map((x, j) => `<option value="b${j}">${esc(x.name.replace(/\n/g, " "))} (${x.from})</option>`).join("")}</optgroup></select>
+  ${t.items.map((it, i) => `<div class="card"><h3>BEST 0${i + 1}</h3><button type="button" class="btn hair-choice-launch" data-hairphotos="${i}">${it.ref && /^h\d+$/.test(it.ref) ? `<img src="hair/${it.ref}.jpg" alt="선택한 헤어 참고 사진">` : ""}<span><b>추천 후보를 사진으로 고르기</b><br><span class="mut">${it.ref ? esc((HAIR_LIB.find(h => h.id === it.ref) || {}).name || "선택한 사진 변경") : "사진을 선택하면 이름·설명·참고 사진이 함께 바뀝니다."}</span></span></button><details><summary>이름으로 후보 고르기</summary><select data-hairpick="${i}"><option value="">— 추천 후보에서 고르기 —</option><optgroup label="${FACE_TYPES[st.type.key].ko} 추천">${lib.map((x, j) => `<option value="a${j}">${esc(x.name.replace(/\n/g, " "))}</option>`).join("")}</optgroup><optgroup label="다른 얼굴형 후보">${others.map((x, j) => `<option value="b${j}">${esc(x.name.replace(/\n/g, " "))} (${x.from})</option>`).join("")}</optgroup></select></details>
     <div class="grid2"><div>${field(`texts.hair.items.${i}.name`, "스타일 이름")}</div><div>${field(`texts.hair.items.${i}.desc`, "설명")}</div></div>
-    <details ${it.ref ? "open" : ""}><summary>참고 헤어 사진 ${it.ref ? "— " + esc((HAIR_LIB.find(h => h.id === it.ref) || {}).name || it.ref) : "(선택)"}</summary><div class="hgal">${HAIR_LIB.map(h => `<div data-href="${i}:${h.id}" class="${it.ref === h.id ? "on" : ""}"><img src="hair/${h.id}.jpg" loading="lazy"><span>${esc(h.name)}</span></div>`).join("")}</div>${it.ref ? `<button class="btn sm ghost" data-hrefclr="${i}">참고 사진 해제</button>` : ""}</details>
+    <details ${it.ref && !it.photoChoice ? "open" : ""}><summary>참고 헤어 사진 ${it.ref ? "— " + esc((HAIR_LIB.find(h => h.id === it.ref) || {}).name || it.ref) : "(선택)"}</summary><div class="hgal">${HAIR_LIB.map(h => `<div data-href="${i}:${h.id}" class="${it.ref === h.id ? "on" : ""}"><img src="hair/${h.id}.jpg" loading="lazy"><span>${esc(h.name)}</span></div>`).join("")}</div>${it.ref ? `<button class="btn sm ghost" data-hrefclr="${i}">참고 사진 해제</button>` : ""}</details>
     ${aiBlock("hair", i)}
     <div class="row">${imgSlot(`texts.hair.items.${i}.img`, "직접 업로드")}<button class="btn sm" data-prompt="hair:${i}">프롬프트 복사(수동 생성용)</button></div></div>`).join("")}
   <div class="card"><h3>VOLUME MAP</h3><div class="grid2">${t.volume.map((v, i) => `<div>${field(`texts.hair.volume.${i}.zone`, `구역 ${i + 1}`, { input: true })}${field(`texts.hair.volume.${i}.text`, "")}</div>`).join("")}</div>
@@ -539,26 +567,61 @@ function viewHair() {
 POST[5] = E => {
   bindImgSlots(E); bindAI(E);
   const lib = FACE_TYPES[st.type.key].hair.items, others = POST[5].others || [];
-  $$("[data-href]", E).forEach(d => d.onclick = () => { const [i, id] = d.dataset.href.split(":"); st.texts.hair.items[+i].ref = id; markStale("hair", +i); const h = HAIR_LIB.find(x => x.id === id); if (st.analyzed && h) queueRefresh(["hair"], `헤어 BEST ${+i + 1}의 참고 사진을 '${h.name}'(으)로 직접 선택함 — 이름·설명·이미지 설명을 이 스타일 기준으로 맞출 것`); renderEditor(); autosave(); });
-  $$("[data-hrefclr]", E).forEach(b => b.onclick = () => { st.texts.hair.items[+b.dataset.hrefclr].ref = ""; renderEditor(); autosave(); });
+  $$("[data-hairphotos]", E).forEach(b => b.onclick = () => openHairPhotoPicker(+b.dataset.hairphotos, b));
+  $$("[data-href]", E).forEach(d => d.onclick = () => { const [i, id] = d.dataset.href.split(":"); selectHairPhoto(+i, id); });
+  $$("[data-hrefclr]", E).forEach(b => b.onclick = () => { const it = st.texts.hair.items[+b.dataset.hrefclr]; it.ref = ""; if (it.photoChoice) it.prompt = ""; delete it.photoChoice; markStale("hair", +b.dataset.hrefclr); renderEditor(); renderPreview(); autosave(); });
   $$("[data-hairpick]", E).forEach(s => s.onchange = () => { if (!s.value) return; const i = +s.dataset.hairpick; const x = s.value[0] === "a" ? lib[+s.value.slice(1)] : others[+s.value.slice(1)];
-    st.texts.hair.items[i].name = x.name; st.texts.hair.items[i].desc = x.desc; markEdited(`texts.hair.items.${i}.name`); markEdited(`texts.hair.items.${i}.desc`); unlock(`texts.hair.items.${i}`); markStale("hair", i); if (st.analyzed) queueRefresh(["hair"], `헤어 BEST ${i + 1}을(를) '${x.name.replace(/\n/g, " ")}'(으)로 직접 선택함 (이 항목의 설명·이미지 설명을 이 스타일에 맞게 다시 쓸 것)`); renderEditor(); schedulePreview(); autosave(); });
+    Object.assign(st.texts.hair.items[i], { name: x.name, desc: x.desc, ref: "", prompt: "" }); delete st.texts.hair.items[i].photoChoice; markEdited(`texts.hair.items.${i}.name`); markEdited(`texts.hair.items.${i}.desc`); unlock(`texts.hair.items.${i}`); markStale("hair", i); if (st.analyzed) queueRefresh(["hair"], `헤어 BEST ${i + 1}을(를) '${x.name.replace(/\n/g, " ")}'(으)로 직접 선택함 (이 항목의 설명·이미지 설명을 이 스타일에 맞게 다시 쓸 것)`); renderEditor(); schedulePreview(); autosave(); });
 };
+
+function selectHairPhoto(index, id) {
+  const photo = HAIR_LIB.find(x => x.id === id); if (!photo) return;
+  const it = st.texts.hair.items[index];
+  Object.assign(it, HairPicker.choose(photo, st.type.key), { photoChoice: id });
+  unlock(`texts.hair.items.${index}`);
+  ["name", "desc", "ref", "prompt"].forEach(k => markEdited(`texts.hair.items.${index}.${k}`));
+  ["name", "ref", "prompt"].forEach(k => lock(`texts.hair.items.${index}.${k}`));
+  if (st.analyzed) queueRefresh(["hair"], `헤어 BEST ${index + 1}을(를) 사진 '${photo.name}'에서 직접 선택함. 참고 사진과 스타일 이름은 유지하고 고객의 얼굴형에 맞춰 설명을 반영할 것`);
+  markStale("hair", index); renderEditor(); renderPreview(); autosave();
+}
+function openHairPhotoPicker(index, trigger) {
+  const m = document.createElement("div"); m.className = "modal hair-picker-modal"; m.setAttribute("role", "dialog"); m.setAttribute("aria-modal", "true"); m.setAttribute("aria-labelledby", "hairPickerTitle");
+  m.innerHTML = `<div class="box"><div class="hair-picker-heading"><h2 id="hairPickerTitle">BEST 0${index + 1} · 사진으로 헤어 고르기</h2><button class="btn" data-hair-close>닫기</button></div><p class="mut">선택한 사진의 스타일 이름·설명·이미지 생성용 참고 사진을 함께 반영합니다. 고객 착용 사진은 선택 후 GPT로 생성해 주세요.</p><div class="hair-picker-toolbar"><input type="search" aria-label="헤어 사진 검색" placeholder="스타일·기장 검색 (예: 단발, 롱, 빌드펌)"><div class="hair-picker-tabs"><button class="btn sm" data-photo-filter="all" aria-pressed="true">전체 사진</button><button class="btn sm" data-photo-filter="face" aria-pressed="false">현재 얼굴형 자료</button></div></div><div class="hair-picker-count" role="status"></div><div class="hair-picker-grid"></div></div>`;
+  document.body.appendChild(m); let onlyFace = false;
+  const close = () => { m.remove(); if (trigger?.isConnected) trigger.focus(); else $(`[data-hairphotos="${index}"]`)?.focus(); };
+  const render = () => {
+    const list = HairPicker.candidates(st.type.key, HAIR_LIB, { query: $("input[type=search]", m).value, recommendedOnly: onlyFace });
+    $(".hair-picker-count", m).textContent = HAIR_LIB.length ? `${list.length}장 · ${HairPicker.faceName(st.type.key)} 자료를 먼저 표시합니다.` : "참고 사진 목록을 불러오지 못했습니다. 닫은 뒤 다시 시도해 주세요.";
+    $(".hair-picker-grid", m).innerHTML = HairPicker.renderCards(list, { selectedId: st.texts.hair.items[index].ref, faceKey: st.type.key });
+    $$("[data-hair-photo]", m).forEach(b => b.onclick = () => { selectHairPhoto(index, b.dataset.hairPhoto); close(); });
+  };
+  $("[data-hair-close]", m).onclick = close;
+  $("input[type=search]", m).oninput = render;
+  $$("[data-photo-filter]", m).forEach(b => b.onclick = () => { onlyFace = b.dataset.photoFilter === "face"; $$("[data-photo-filter]", m).forEach(x => x.setAttribute("aria-pressed", String(x === b))); render(); });
+  m.addEventListener("keydown", e => {
+    if (e.key === "Escape") { e.preventDefault(); close(); return; }
+    if (e.key === "Tab") { const focusable = $$("button:not(:disabled),input:not(:disabled)", m); const first = focusable[0], last = focusable.at(-1); if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last?.focus(); } else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first?.focus(); } }
+  });
+  render(); $("input[type=search]", m).focus();
+}
 
 /* ---------- 6. 메이크업 ---------- */
 async function runMakeupGuide(btn, mode) {
   if (!_aiConsent) { if (!confirm("고객 사진이 OpenAI(GPT 이미지)로 전송됩니다.\n고객에게 동의를 받으셨나요?")) return; _aiConsent = true; }
   const t = st.texts.makeup; const base = mode === "upgrade" && t.guideImg && t.guideQ === "low" ? t.guideImg : null;
   btn.disabled = true; btn.textContent = "생성 중… (30초~1분)";
+  const targetState = st; activeAIRequests++;
   try {
-    const r = await generateAIImage("makeup", st, null, { mode: mode === "draft" ? "draft" : "final", base });
+    const r = await generateAIImage("makeup", targetState, null, { mode: mode === "draft" ? "draft" : "final", base });
     const img = await shrinkDataURL(r.image, 1536);
     let lm = null; try { lm = await detectLandmarks(img); } catch (e) { console.warn(e); }
+    if (st !== targetState) return;
     t.guideCands = [...(t.guideCands || []), { img, lm, q: r.quality }].slice(-6);
     t.guideImg = img; t.guideLm = lm; t.guideQ = r.quality; t.mode = "guide";
     if (!lm) toast("생성된 사진에서 얼굴을 찾지 못했어요. 다시 생성해 주세요.", 6000);
     autosave(); renderPreview();
   } catch (e) { toast("생성 실패: " + esc(e.message), 7000); }
+  finally { activeAIRequests--; }
   if (st.step === 6) renderEditor();
 }
 function viewMakeup() {
@@ -587,7 +650,7 @@ function viewMakeup() {
 }
 POST[6] = E => {
   const g = $("#mkGen", E); if (g) g.onclick = async () => { if (!_aiConsent) { if (!confirm("고객 사진이 OpenAI(GPT 이미지)로 전송됩니다.\n고객에게 동의를 받으셨나요?")) return; _aiConsent = true; }
-    g.disabled = true; g.textContent = "생성 중… (1~2분)"; try { const r = await generateAIImage("makeupPoster", st, null, { mode: "final" }); const img = await shrinkDataURL(r.image, 1600); const t = st.texts.makeup; t.cands = [...(t.cands || []), img].slice(-4); t.fullImage = img; t.mode = "image"; autosave(); renderPreview(); } catch (e) { toast("생성 실패: " + esc(e.message), 7000); } renderEditor(); };
+    g.disabled = true; g.textContent = "생성 중… (1~2분)"; const targetState = st, t = targetState.texts.makeup; activeAIRequests++; try { const r = await generateAIImage("makeupPoster", targetState, null, { mode: "final" }); const img = await shrinkDataURL(r.image, 1600); if (st !== targetState) return; t.cands = [...(t.cands || []), img].slice(-4); t.fullImage = img; t.mode = "image"; autosave(); renderPreview(); } catch (e) { toast("생성 실패: " + esc(e.message), 7000); } finally { activeAIRequests--; } renderEditor(); };
   $$("[data-mkg]", E).forEach(b => b.onclick = () => runMakeupGuide(b, b.dataset.mode));
   $$("[data-mkgpick]", E).forEach(im => im.onclick = () => { const t = st.texts.makeup; const c = t.guideCands[+im.dataset.mkgpick]; t.guideImg = c.img; t.guideLm = c.lm; t.guideQ = c.q; renderEditor(); renderPreview(); autosave(); });
   $$("[data-mkpick]", E).forEach(im => im.onclick = () => { const t = st.texts.makeup; t.fullImage = t.cands[+im.dataset.mkpick]; t.mode = "image"; renderEditor(); renderPreview(); autosave(); });
@@ -612,7 +675,7 @@ function viewAcc(kind) {
     <div class="grid2"><div>${field(`texts.${key}.items.${i}.name`, "이름", { input: true })}</div><div>${field(`texts.${key}.items.${i}.desc`, "설명")}</div></div>
     ${aiBlock(key, i)}
     <div class="row">${imgSlot(`texts.${key}.items.${i}.img`, "직접 업로드")}${it.img ? `<label class="mut"><input type="checkbox" data-path="texts.${key}.items.${i}.useUpload" ${it.useUpload ? "checked" : ""}> 사진(AI·업로드) 사용 — 끄면 자동 그림</label>` : ""}<button class="btn sm" data-prompt="${key}:${i}">프롬프트 복사(수동 생성용)</button></div></div>`).join("")}
-  <div class="card"><h3>DETAIL SCALE</h3><div class="grid2">${L.map((l, i) => `<div><label class="f">${i + 1}. ${l[0]} <span class="mut">(${l[1]} ← → ${l[2]})</span></label><input type="range" min="0" max="4" step="1" data-path="texts.${key}.scales.${i}" value="${t.scales[i]}">${field(`texts.${key}.scaleText.${i}`, "", { input: true })}</div>`).join("")}</div></div>
+  <div class="card"><h3>DETAIL SCALE</h3><p class="mut">선택한 3종의 모양·색·크기와 얼굴형을 종합해 반영합니다. 직접 조절한 값과 문구는 유지되며, 생성된 사진은 다시 생성해야 바뀝니다.</p><div class="grid2">${L.map((l, i) => `<div><label class="f">${i + 1}. ${l[0]} <span class="mut">(${l[1]} ← → ${l[2]})</span></label><input type="range" min="0" max="4" step="1" data-path="texts.${key}.scales.${i}" value="${t.scales[i]}">${field(`texts.${key}.scaleText.${i}`, "", { input: true })}</div>`).join("")}</div></div>
   <div class="card"><h3>SHOPPING CHECK</h3>${t.checks.map((c, i) => field(`texts.${key}.checks.${i}`, "", { input: true })).join("")}</div>`;
 }
 function viewGlasses() { return `<h2>7. 안경</h2><p class="lead">AI가 고른 안경 3종을 고객 사진에 GPT로 씌웁니다. 이미지가 없으면 자동 그림으로 표시됩니다.</p>${viewAcc("g")}`; }
@@ -631,7 +694,7 @@ function drawEarSVG() {
 function postAcc(E, key) {
   bindImgSlots(E); bindAI(E);
   $$("[data-accpick]", E).forEach(s => s.onchange = () => { if (s.value === "") return; const [k, i] = s.dataset.accpick.split(":"); const x = FACE_TYPES[st.type.key][k].items[+s.value];
-    Object.assign(st.texts[k].items[+i], { shape: x.shape, name: x.name, desc: x.desc }); ["shape", "name", "desc"].forEach(f => markEdited(`texts.${k}.items.${i}.${f}`)); unlock(`texts.${k}.items.${i}`); markStale(k, +i); if (st.analyzed) queueRefresh([k], `${k === "glasses" ? "안경" : "귀걸이"} 0${+i + 1}을(를) '${x.name}'(으)로 직접 선택함`); renderEditor(); schedulePreview(); autosave(); });
+    Object.assign(st.texts[k].items[+i], { shape: x.shape, name: x.name, desc: x.desc }); ["shape", "name", "desc"].forEach(f => markEdited(`texts.${k}.items.${i}.${f}`)); unlock(`texts.${k}.items.${i}`); ["shape", "color", "size"].forEach(f => lock(`texts.${k}.items.${i}.${f}`)); markStale(k, +i); syncAccessoryScales(k); if (st.analyzed) queueRefresh([k], `${k === "glasses" ? "안경" : "귀걸이"} 0${+i + 1}을(를) '${x.name}'(으)로 직접 선택함`); renderEditor(); schedulePreview(); autosave(); });
   $$("select[data-path$='.shape'], select[data-path$='.color']", E).forEach(s => s.addEventListener("change", () => renderEditor()));
   $$("input[type=range][data-path$='.size']", E).forEach(s => s.addEventListener("input", () => { s.previousElementSibling.textContent = "크기 " + (+s.value).toFixed(2); }));
 }
@@ -658,7 +721,7 @@ POST[9] = E => {
   $("#doPrint").onclick = doPrint; $("#doSave").onclick = saveProject; $("#dSave").onclick = driveSave;
   $("#doPdf").onclick = async () => { busy("PDF 만드는 중…"); try { dlBlob(fileBase() + ".pdf", await makePDF()); } catch (e) { toast("PDF 오류: " + esc(e.message)); } busy(); };
   $("#dList").onclick = async () => { try { const fs = await driveFolders(); $("#dl").innerHTML = fs.length ? fs.map(f => `<div class="row" style="margin-top:6px"><button class="btn sm" data-df="${f.id}">열기</button> ${esc(f.name)} <span class="mut">${f.modifiedTime.slice(0, 10)}</span></div>`).join("") : `<p class="mut">저장된 보고서가 없습니다</p>`;
-    $$("[data-df]").forEach(b => b.onclick = async () => { busy("불러오는 중…"); try { const p = await driveProject(b.dataset.df); if (p) { st = deepMerge(newState(), p); st.settings = loadSettings(); updateRatios(); goStep(3); autosave(); } } catch (e) { toast(esc(e.message)); } busy(); }); } catch (e) { toast(esc(e.message), 6000); } };
+    $$("[data-df]").forEach(b => b.onclick = async () => { if (!(await DraftUI.beforeSwitch())) return; busy("불러오는 중…"); try { const raw = await driveProject(b.dataset.df); if (raw) { const p = ProjectStore.sanitizeState(raw); st = deepMerge(newState(), p); delete st.projectLink; st.settings = loadSettings(); clearTimeout(_rq.t); _rq.scopes.clear(); _rq.notes = []; refreshBadge(); updateRatios(); goStep(3); DraftUI.loaded(); DraftUI.changed(); autosave({ quiet: true }); } } catch (e) { toast(esc(e.message)); } busy(); }); } catch (e) { toast(esc(e.message), 6000); } };
 };
 function openPasteModal() {
   const m = document.createElement("div"); m.className = "modal";
@@ -688,7 +751,7 @@ function fileBase() { const d = (st.client.date || today()).replace(/-/g, "").sl
 function download(name, text, type = "application/json") { const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([text], { type })); a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 3000); }
 function saveProject() { download(fileBase() + ".json", JSON.stringify(st)); toast("작업 파일을 저장했어요."); }
 function loadProjectFile(file) {
-  const r = new FileReader(); r.onload = () => { try { const j = JSON.parse(r.result); const base = newState(); st = deepMerge(base, j); st.settings = deepMerge(loadSettings(), j.settings || {}); updateRatios(); goStep(st.step || 9); toast("작업 파일을 불러왔어요."); } catch (e) { alert("불러오기 실패: " + e.message); } };
+  const r = new FileReader(); r.onload = () => { try { const j = ProjectStore.sanitizeState(JSON.parse(r.result)); const base = newState(); st = deepMerge(base, j); delete st.projectLink; st.settings = deepMerge(loadSettings(), j.settings || {}); clearTimeout(_rq.t); _rq.scopes.clear(); _rq.notes = []; refreshBadge(); updateRatios(); goStep(st.step || 9); DraftUI.loaded(); DraftUI.changed(); autosave({ quiet: true }); toast("작업 파일을 불러왔어요. 임시저장하면 공용 저장소에 새 작업으로 저장됩니다."); } catch (e) { alert("불러오기 실패: " + e.message); } };
   r.readAsText(file);
 }
 function doPrint() {
@@ -709,7 +772,7 @@ const DB = {
   async get(k) { const db = await this.open(); return new Promise(res => { const r = db.transaction("kv").objectStore("kv").get(k); r.onsuccess = () => res(r.result); r.onerror = () => res(null); }); },
 };
 let _asT = null;
-function autosave() { clearTimeout(_asT); _asT = setTimeout(() => { DB.set("current", JSON.stringify(st)).catch(() => {}); }, 800); }
+function autosave({ quiet = false } = {}) { if (!quiet && typeof DraftUI !== "undefined") DraftUI.changed(); clearTimeout(_asT); _asT = setTimeout(() => { DB.set("current", JSON.stringify(st)).catch(() => {}); }, 800); }
 
 /* ================= 설정 ================= */
 function openSettings() {
@@ -759,16 +822,17 @@ function openHelp() {
 async function init() {
   if (window.__inited) return; window.__inited = true;
   document.body.innerHTML = `<div id="app"><div class="topbar"><img class="logo" src="${LOGO}" alt=""><div class="ttl">페이스 분석결과지<small>AI 분석 · GPT 이미지 · 8쪽</small></div>
-    <button class="btn" id="tbNew">새 고객</button><label class="btn">불러오기<input type="file" id="tbLoad" accept=".json" style="display:none"></label><button class="btn" id="tbSave">저장</button>
+    <button class="btn" id="tbNew">새 고객</button><button class="btn pri" id="tbDraftSave">임시저장</button><button class="btn" id="tbDraftLibrary">저장소</button><span class="mut" id="draftStatus" role="status"></span><label class="btn">파일 불러오기<input type="file" id="tbLoad" accept=".json" style="display:none"></label><button class="btn" id="tbSave">파일 내보내기</button>
     <button class="btn sm" id="rfBadge" style="display:none;background:#fff7e6;border-color:#f0c36d"></button><span class="mut" style="font-size:12px">${esc(AUTH.email || "")}</span><button class="btn" id="tbSet">설정</button><button class="btn" onclick="logout()">로그아웃</button></div>
     <div class="main"><div class="nav"></div><div class="editor"></div><div class="preview"><div class="ptabs"></div><div class="pscroll"></div></div></div></div><div id="printArea"></div>`;
-  $("#tbNew").onclick = () => { if (!confirm("새 고객 작업을 시작할까요? (현재 작업은 '저장'으로 파일을 남겨 두세요)")) return; st = newState(); goStep(1); autosave(); };
-  $("#tbLoad").onchange = e => { if (e.target.files[0]) loadProjectFile(e.target.files[0]); e.target.value = ""; };
+  $("#tbNew").onclick = async () => { if (!(await DraftUI.beforeSwitch())) return; st = newState(); clearTimeout(_rq.t); _rq.scopes.clear(); _rq.notes = []; refreshBadge(); goStep(1); DraftUI.loaded(); autosave({ quiet: true }); };
+  $("#tbLoad").onchange = async e => { const file = e.target.files[0]; e.target.value = ""; if (file && await DraftUI.beforeSwitch()) loadProjectFile(file); };
   $("#tbSave").onclick = saveProject; $("#tbSet").onclick = openSettings;
   window.addEventListener("resize", () => schedulePreview(100));
   st = newState();
-  try { const saved = await DB.get("current"); if (saved) { const j = JSON.parse(saved); st = deepMerge(newState(), j); st.settings = loadSettings(); updateRatios(); if (j.client?.name || j.photos?.front) toast(`이전 작업(${esc(j.client?.name || "이름 없음")})을 이어서 엽니다. 새로 시작하려면 '새 고객'을 누르세요.`, 4500); } } catch (e) { console.warn(e); }
+  try { const saved = await DB.get("current"); if (saved) { const j = ProjectStore.sanitizeState(JSON.parse(saved)); st = deepMerge(newState(), j); st.settings = loadSettings(); updateRatios(); if (j.client?.name || j.photos?.front) toast(`이전 작업(${esc(j.client?.name || "이름 없음")})을 이어서 엽니다. 새로 시작하려면 '새 고객'을 누르세요.`, 4500); } } catch (e) { console.warn(e); }
   goStep(st.step || 1);
+  DraftUI.init();
   if (document.fonts) document.fonts.ready.then(() => schedulePreview(50));
 }
 window.addEventListener("DOMContentLoaded", boot);

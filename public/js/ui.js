@@ -42,7 +42,7 @@ const isEdited = p => st.edited.includes(p);
 function markEdited(p) { if (!st.edited.includes(p)) st.edited.push(p); }
 
 /* ---- 문장 재생성 (사용자가 고친 칸은 유지) ---- */
-const KEEP_KEYS = new Set(["img", "useUpload", "fullImage", "mode", "cands", "prompt", "ref", "candQ", "imgQ", "guideImg", "guideLm", "guideCands", "guideCandQ", "guideQ", "stale"]);
+const KEEP_KEYS = new Set(["img", "useUpload", "fullImage", "mode", "cands", "prompt", "ref", "candQ", "imgQ", "guideImg", "guideLm", "guideCands", "guideCandQ", "guideQ", "stale", "imgSourceKey", "candSources", "guideSourceKey", "fullImageSourceKey"]);
 function regenerate(force = false, only = null) {
   const fresh = generateTexts(st);
   const walk = (dst, src, path) => {
@@ -185,14 +185,19 @@ POST[1] = E => {
     box.ondrop = async e => { e.preventDefault(); box.style.background = ""; const f = e.dataTransfer.files[0]; if (f) await fn(f); };
   };
   hook("upFront", async f => {
-    st.photos.frontOrig = await fileToDataURL(f, 1800); st.edited = st.edited.filter(p => p !== "front.lines");
+    const targetState = st, src = await fileToDataURL(f, 1800), image = await loadImage(src);
+    if (st !== targetState) return;
+    ImageSource.stampLegacySources(st);
+    st.photos.frontOrig = src; st.photos.front = src;
+    Object.assign(st.front, { w: image.width, h: image.height, pts: null, lines: defaultLines(image.width, image.height), auto: false, rot: 0 });
+    updateRatios(); st.edited = st.edited.filter(p => p !== "front.lines");
     renderEditor(); const s = $("#anaStatus"); s.style.display = "";
     await analyzeFront(s); renderNav(); renderPreview(); autosave();
     $("#upFront").innerHTML = `<img src="${BlobCache.get(st.photos.frontOrig)}"><input type="file" accept="image/*"><div class="mut">클릭해서 바꾸기</div>`; POST[1](E);
   });
-  hook("upSide", async f => { const d = await fileToDataURL(f, 1600); const im = await loadImage(d); Object.assign(st.side, { src: d, w: im.width, h: im.height, pts: [null, null, null] }); renderEditor(); renderNav(); autosave(); });
-  hook("upEar", async f => { const d = await fileToDataURL(f, 1600); const im = await loadImage(d); Object.assign(st.ear, { src: d, w: im.width, h: im.height, lobe: null }); renderEditor(); renderNav(); autosave(); });
-  const se = $("#sideToEar", E); if (se) se.onclick = () => { Object.assign(st.ear, { src: st.side.src, w: st.side.w, h: st.side.h, lobe: null }); toast("측면 사진을 귀 사진으로 지정했어요. 8단계에서 귓불 위치를 찍어 주세요."); renderEditor(); renderNav(); };
+  hook("upSide", async f => { const d = await fileToDataURL(f, 1600); const im = await loadImage(d); ImageSource.stampLegacySources(st); Object.assign(st.side, { src: d, w: im.width, h: im.height, pts: [null, null, null] }); renderEditor(); renderNav(); autosave(); });
+  hook("upEar", async f => { const d = await fileToDataURL(f, 1600); const im = await loadImage(d); ImageSource.stampLegacySources(st); Object.assign(st.ear, { src: d, w: im.width, h: im.height, lobe: null }); renderEditor(); renderNav(); autosave(); });
+  const se = $("#sideToEar", E); if (se) se.onclick = () => { ImageSource.stampLegacySources(st); Object.assign(st.ear, { src: st.side.src, w: st.side.w, h: st.side.h, lobe: null }); toast("측면 사진을 귀 사진으로 지정했어요. 8단계에서 귓불 위치를 찍어 주세요."); renderEditor(); renderNav(); };
   $$("[data-man]", E).forEach(inp => inp.oninput = () => { st.manual[inp.dataset.man] = inp.value.replace(/\s/g, ""); if (st.analyzed) queueRefresh(["ratios"], `${(RATIO_IN.find(r => r[0] === inp.dataset.man) || [])[1]} 비율을 ${st.manual[inp.dataset.man]}(으)로 직접 수정함`, 2500); regenerate(false); schedulePreview(); autosave(); const b = $("#runAna"); if (b) b.disabled = !(st.photos.front && st.side.src && RATIO_IN.every(([k]) => st.manual[k])); });
   $("#shots", E).onchange = async e => { const fs = [...e.target.files]; if (!fs.length) return; busy("캡처에서 비율을 읽는 중…");
     try { const imgs = await Promise.all(fs.map(f => fileToDataURL(f, 1100))); const r = await apiPost("/api/analyze", { task: "ratios", images: imgs });
@@ -496,15 +501,23 @@ function imgSlot(path, label) {
   return `<div class="row" style="margin-top:6px"><label class="btn sm">${label}<input type="file" accept="image/*" data-img="${path}" style="display:none"></label>${v ? `<span class="mut">✓ 업로드됨</span><button class="btn sm ghost" data-imgdel="${path}">삭제</button>` : ""}</div>`;
 }
 function bindImgSlots(E) {
-  $$("[data-img]", E).forEach(inp => inp.onchange = async () => { if (!inp.files[0]) return; setPath(st, inp.dataset.img, await fileToDataURL(inp.files[0], 1400)); const up = inp.dataset.img.replace(/\.img$/, ".useUpload"); if (getPath(st, up) !== undefined) setPath(st, up, true); renderEditor(); renderPreview(); renderNav(); autosave(); });
-  $$("[data-imgdel]", E).forEach(b => b.onclick = () => { setPath(st, b.dataset.imgdel, null); const up = b.dataset.imgdel.replace(/\.img$/, ".useUpload"); if (getPath(st, up) !== undefined) setPath(st, up, false); renderEditor(); renderPreview(); autosave(); });
+  $$("[data-img]", E).forEach(inp => inp.onchange = async () => {
+    if (!inp.files[0]) return;
+    const targetState = st, path = inp.dataset.img, kind = path.split(".")[1], sourceKey = ImageSource.sourceKey(targetState, kind);
+    const image = await fileToDataURL(inp.files[0], 1400); if (st !== targetState) return;
+    setPath(st, path, image);
+    if (path.endsWith(".img")) { const item = getPath(st, path.slice(0, -4)); item.imgSourceKey = sourceKey; item.stale = false; item.useUpload = true; }
+    else if (path === "texts.makeup.fullImage") st.texts.makeup.fullImageSourceKey = sourceKey;
+    renderEditor(); renderPreview(); renderNav(); autosave();
+  });
+  $$("[data-imgdel]", E).forEach(b => b.onclick = () => { const path = b.dataset.imgdel; setPath(st, path, null); if (path.endsWith(".img")) { const item = getPath(st, path.slice(0, -4)); item.useUpload = false; delete item.imgSourceKey; } else if (path === "texts.makeup.fullImage") delete st.texts.makeup.fullImageSourceKey; renderEditor(); renderPreview(); autosave(); });
   $$("[data-prompt]", E).forEach(b => b.onclick = () => { const [kind, i] = b.dataset.prompt.split(":"); const item = kind === "hair" ? st.texts.hair.items[i] : kind === "glasses" ? st.texts.glasses.items[i] : st.texts.earrings.items[i]; copyText(imgPromptFor(kind, st, item)); toast("이미지 생성 프롬프트를 복사했어요. ChatGPT·Gemini 등에 고객 사진과 함께 붙여넣으세요."); });
 }
 
 /* ---------- AI 이미지 생성 블록 ---------- */
 function aiBlock(kind, i) {
   const item = (kind === "hair" ? st.texts.hair : st.texts[kind]).items[i]; const cands = item.cands || [];
-  return `<div class="aiblk">${item.stale && item.img ? `<div class="status err" style="margin:0 0 6px">선택이 바뀌었어요 — 이미지를 다시 생성하는 것을 권장합니다</div>` : ""}${field(`texts.${kind === "hair" ? "hair" : kind}.items.${i}.prompt`, "이미지 생성 설명 (AI가 작성, 수정 가능)", { rows: 2 })}${genButtons(`data-ai="${kind}:${i}"`, item.img && item.imgQ === "low", kind === "earrings" ? "pt" : "sq")}
+  return `<div class="aiblk">${item.stale && item.img ? `<div class="status err" style="margin:0 0 6px">선택이 바뀌었어요 — 이미지를 다시 생성하는 것을 권장합니다</div>` : ""}${field(`texts.${kind === "hair" ? "hair" : kind}.items.${i}.prompt`, "이미지 생성 설명 (AI가 작성, 수정 가능)", { rows: 2 })}${genButtons(`data-ai="${kind}:${i}"`, ImageSource.isCurrentImage(st, kind, item) && item.imgQ === "low", kind === "earrings" ? "pt" : "sq")}
     ${cands.length ? `<div class="thumbs" style="margin-top:8px">${cands.map((c, j) => `<div class="th"><div style="border:2px solid ${item.img === c ? "var(--br)" : "transparent"};position:relative"><img src="${BlobCache.get(c)}" data-pick="${kind}:${i}:${j}" style="cursor:pointer">${qTag((item.candQ || [])[j])}</div><button class="btn sm ghost" data-candel="${kind}:${i}:${j}">삭제</button></div>`).join("")}</div><div class="mut">썸네일을 클릭하면 보고서에 사용됩니다.</div>` : ""}</div>`;
 }
 let _aiConsent = false;
@@ -518,10 +531,11 @@ function genButtons(attr, canUpgrade, sz = "pt", n = 1) {
 async function runAI(kind, i, btn, mode = "final") {
   if (!_aiConsent) { if (!confirm("고객 사진이 OpenAI(GPT 이미지)로 전송됩니다.\n고객에게 동의를 받으셨나요?")) return; _aiConsent = true; }
   const items = (kind === "hair" ? st.texts.hair : st.texts[kind]).items; const item = items[i];
-  const base = mode === "upgrade" && item.img && item.imgQ === "low" ? item.img : null;
+  ImageSource.stampLegacySources(st);
+  const base = mode === "upgrade" && ImageSource.isCurrentImage(st, kind, item) && item.imgQ === "low" ? item.img : null;
   if (mode === "upgrade" && !base) mode = "final";
   if (btn) { btn.disabled = true; btn.textContent = "생성 중… (20~60초)"; }
-  const targetState = st, previousImage = item.img;
+  const targetState = st, previousImage = item.img, requestedSource = ImageSource.sourceKey(st, kind);
   const designSignature = () => JSON.stringify({
     prompt: imgPromptFor(kind, targetState, item), ref: item.ref || "",
     source: kind === "earrings" ? targetState.ear.src || targetState.side.src : targetState.photos.frontOrig || targetState.photos.front,
@@ -532,11 +546,11 @@ async function runAI(kind, i, btn, mode = "final") {
     const requestedDesign = designSignature();
     const r = await generateAIImage(kind, targetState, item, { mode: mode === "draft" ? "draft" : "final", base }); const img = await shrinkDataURL(r.image, 1100);
     if (st !== targetState || targetState.texts[kind].items[i] !== item) return;
-    const changed = requestedDesign !== designSignature() || item.img !== previousImage;
-    const cq = (item.candQ || []).slice(-(item.cands || []).length); item.cands = [...(item.cands || []), img]; item.candQ = [...cq, r.quality];
-    if (item.cands.length > 6) { item.cands = item.cands.slice(-6); item.candQ = item.candQ.slice(-6); }
+    const changed = requestedSource !== ImageSource.sourceKey(targetState, kind) || requestedDesign !== designSignature() || item.img !== previousImage;
+    const cq = (item.candQ || []).slice(-(item.cands || []).length); item.cands = [...(item.cands || []), img]; item.candQ = [...cq, r.quality]; item.candSources = [...(item.candSources || []), requestedSource];
+    if (item.cands.length > 6) { item.cands = item.cands.slice(-6); item.candQ = item.candQ.slice(-6); item.candSources = item.candSources.slice(-6); }
     if (changed) { item.stale = true; toast("선택이 바뀌어 생성 결과는 후보에 보관했어요. 현재 사진은 유지합니다.", 5000); }
-    else { item.stale = false; item.img = img; item.imgQ = r.quality; if (kind !== "hair") item.useUpload = true; }
+    else { item.stale = false; item.img = img; item.imgQ = r.quality; item.imgSourceKey = requestedSource; if (kind !== "hair") item.useUpload = true; }
     autosave(); renderPreview(); renderNav();
   } catch (e) { console.error(e); toast("AI 생성 실패: " + esc(e.message), 6000); }
   finally { activeAIRequests--; }
@@ -545,15 +559,15 @@ async function runAI(kind, i, btn, mode = "final") {
 function bindAI(E) {
   $$("[data-ai]", E).forEach(b => b.onclick = () => { const [k, i] = b.dataset.ai.split(":"); runAI(k, +i, b, b.dataset.mode || "final"); });
   $$("[data-aiall]", E).forEach(b => b.onclick = async () => { const k = b.dataset.aiall, m = b.dataset.mode || "final"; b.disabled = true; b.textContent = "3개 생성 중…"; await Promise.all([0, 1, 2].map(i => runAI(k, i, null, m === "final" ? "upgrade" : m))); });
-  $$("[data-pick]", E).forEach(im => im.onclick = () => { const [k, i, j] = im.dataset.pick.split(":"); const it = (k === "hair" ? st.texts.hair : st.texts[k]).items[+i]; it.img = it.cands[+j]; it.imgQ = (it.candQ || [])[+j] || "medium"; if (k !== "hair") it.useUpload = true; renderEditor(); renderPreview(); autosave(); });
-  $$("[data-candel]", E).forEach(b => b.onclick = () => { const [k, i, j] = b.dataset.candel.split(":"); const it = (k === "hair" ? st.texts.hair : st.texts[k]).items[+i]; const c = it.cands[+j]; it.cands.splice(+j, 1); if (it.candQ) it.candQ.splice(+j, 1); if (it.img === c) { it.img = it.cands[it.cands.length - 1] || null; if (k !== "hair" && !it.img) it.useUpload = false; } renderEditor(); renderPreview(); autosave(); });
+  $$("[data-pick]", E).forEach(im => im.onclick = () => { const [k, i, j] = im.dataset.pick.split(":"); const it = (k === "hair" ? st.texts.hair : st.texts[k]).items[+i]; const sourceKey = it.candSources?.[+j]; if (!ImageSource.matches(st, k, sourceKey)) { toast("이전 고객 사진으로 만든 후보예요. 현재 사진으로 다시 생성해 주세요.", 5000); return; } it.img = it.cands[+j]; it.imgQ = (it.candQ || [])[+j] || "medium"; it.imgSourceKey = sourceKey || ImageSource.sourceKey(st, k); it.stale = false; if (k !== "hair") it.useUpload = true; renderEditor(); renderPreview(); autosave(); });
+  $$("[data-candel]", E).forEach(b => b.onclick = () => { const [k, i, j] = b.dataset.candel.split(":"); const it = (k === "hair" ? st.texts.hair : st.texts[k]).items[+i]; const c = it.cands[+j]; it.cands.splice(+j, 1); if (it.candQ) it.candQ.splice(+j, 1); if (it.candSources) it.candSources.splice(+j, 1); if (it.img === c) { it.img = null; delete it.imgSourceKey; if (k !== "hair") it.useUpload = false; } renderEditor(); renderPreview(); autosave(); });
 }
 
 /* ---------- 5. 헤어 ---------- */
 function viewHair() {
   const t = st.texts.hair; const lib = FACE_TYPES[st.type.key].hair.items;
   const others = FACE_TYPE_KEYS.filter(k => k !== st.type.key).flatMap(k => FACE_TYPES[k].hair.items.map(x => ({ ...x, from: FACE_TYPES[k].ko })));
-  return `<h2>5. 헤어 BEST 3</h2><p class="lead">고객 정면 사진으로 GPT가 헤어스타일을 입힌 사진을 만듭니다. 기존 보고서의 헤어 사진(${HAIR_LIB.length}장)을 '참고 사진'으로 고르면 그 스타일을 더 정확하게 따라 합니다.</p>
+  return `<h2>5. 헤어 BEST 3</h2><p class="lead">고객 원본 얼굴은 유지하고 헤어스타일만 바꿉니다. 사진(${HAIR_LIB.length}장)에서 스타일을 고른 뒤 '시안' 또는 '확정'을 누르세요. 참고 사진은 머리 모양에만 사용됩니다.</p>
   <div class="card">${field("texts.hair.keywords", "키워드 (굵은 글씨)", { input: true })}${field("texts.hair.desc", "설명 2줄")}<div class="row" style="margin-top:8px"><button class="btn sm" data-aiall="hair" data-mode="draft">🧪 헤어 3개 시안 (약 ${PRICE_KRW.sq.low * 3}원)</button><button class="btn sm pri" data-aiall="hair" data-mode="final">✨ 헤어 3개 확정 (약 ${PRICE_KRW.sq.medium * 3}원)</button></div><div class="mut">'확정'은 시안을 고른 칸은 그 시안을 그대로 고화질로, 나머지는 새로 만듭니다.</div></div>
   ${t.items.map((it, i) => `<div class="card"><h3>BEST 0${i + 1}</h3><button type="button" class="btn hair-choice-launch" data-hairphotos="${i}">${it.ref && /^h\d+$/.test(it.ref) ? `<img src="hair/${it.ref}.jpg" alt="선택한 헤어 참고 사진">` : ""}<span><b>추천 후보를 사진으로 고르기</b><br><span class="mut">${it.ref ? esc((HAIR_LIB.find(h => h.id === it.ref) || {}).name || "선택한 사진 변경") : "사진을 선택하면 이름·설명·참고 사진이 함께 바뀝니다."}</span></span></button><details><summary>이름으로 후보 고르기</summary><select data-hairpick="${i}"><option value="">— 추천 후보에서 고르기 —</option><optgroup label="${FACE_TYPES[st.type.key].ko} 추천">${lib.map((x, j) => `<option value="a${j}">${esc(x.name.replace(/\n/g, " "))}</option>`).join("")}</optgroup><optgroup label="다른 얼굴형 후보">${others.map((x, j) => `<option value="b${j}">${esc(x.name.replace(/\n/g, " "))} (${x.from})</option>`).join("")}</optgroup></select></details>
     <div class="grid2"><div>${field(`texts.hair.items.${i}.name`, "스타일 이름")}</div><div>${field(`texts.hair.items.${i}.desc`, "설명")}</div></div>
@@ -608,17 +622,23 @@ function openHairPhotoPicker(index, trigger) {
 /* ---------- 6. 메이크업 ---------- */
 async function runMakeupGuide(btn, mode) {
   if (!_aiConsent) { if (!confirm("고객 사진이 OpenAI(GPT 이미지)로 전송됩니다.\n고객에게 동의를 받으셨나요?")) return; _aiConsent = true; }
-  const t = st.texts.makeup; const base = mode === "upgrade" && t.guideImg && t.guideQ === "low" ? t.guideImg : null;
+  ImageSource.stampLegacySources(st);
+  const t = st.texts.makeup; const base = mode === "upgrade" && ImageSource.isCurrentMakeup(st) && t.guideQ === "low" ? t.guideImg : null;
   btn.disabled = true; btn.textContent = "생성 중… (30초~1분)";
-  const targetState = st; activeAIRequests++;
+  const targetState = st, requestedSource = ImageSource.sourceKey(st, "makeup"), previousImage = t.guideImg;
+  const requestedDesign = makeupFacePrompt(targetState); activeAIRequests++;
   try {
     const r = await generateAIImage("makeup", targetState, null, { mode: mode === "draft" ? "draft" : "final", base });
     const img = await shrinkDataURL(r.image, 1536);
     let lm = null; try { lm = await detectLandmarks(img); } catch (e) { console.warn(e); }
-    if (st !== targetState) return;
-    t.guideCands = [...(t.guideCands || []), { img, lm, q: r.quality }].slice(-6);
-    t.guideImg = img; t.guideLm = lm; t.guideQ = r.quality; t.mode = "guide";
-    if (!lm) toast("생성된 사진에서 얼굴을 찾지 못했어요. 다시 생성해 주세요.", 6000);
+    if (st !== targetState || targetState.texts.makeup !== t) return;
+    t.guideCands = [...(t.guideCands || []), { img, lm, q: r.quality, sourceKey: requestedSource }].slice(-6);
+    const changed = requestedSource !== ImageSource.sourceKey(targetState, "makeup") || requestedDesign !== makeupFacePrompt(targetState) || previousImage !== t.guideImg;
+    if (changed) toast("사진이나 선택이 바뀌어 생성 결과는 후보에 보관했어요. 현재 사진은 유지합니다.", 5000);
+    else {
+      t.guideImg = img; t.guideLm = lm; t.guideQ = r.quality; t.guideSourceKey = requestedSource; t.mode = "guide";
+      if (!lm) toast("생성된 사진에서 얼굴을 찾지 못했어요. 다시 생성해 주세요.", 6000);
+    }
     autosave(); renderPreview();
   } catch (e) { toast("생성 실패: " + esc(e.message), 7000); }
   finally { activeAIRequests--; }
@@ -628,13 +648,13 @@ function viewMakeup() {
   const t = st.texts.makeup;
   const G = st.texts.makeupGuide;
   const mode = t.mode || "guide";
-  return `<h2>6. 맞춤 메이크업</h2><p class="lead">기본은 <b>GPT 그림 + 프로그램 글씨</b> 방식이에요. GPT는 글씨 없이 메이크업을 입힌 사진 1장만 만들고, 부위 사진·번호·설명 글은 프로그램이 또렷한 글꼴로 얹습니다.</p>
+  return `<h2>6. 맞춤 메이크업</h2><p class="lead">고객 원본 얼굴을 기준으로 메이크업만 적용합니다. 얼굴형·이목구비·헤어와 표정은 유지하고, 부위 사진·번호·설명은 10개 부위에 맞춰 표시합니다.</p>
   ${mode === "guide" ? `<div class="card"><h3>GPT 메이크업 사진 (글씨 없음)</h3>
-    ${genButtons(`data-mkg="1"`, t.guideImg && t.guideQ === "low", "pt")}
+    ${genButtons(`data-mkg="1"`, ImageSource.isCurrentMakeup(st) && t.guideQ === "low", "pt")}
     ${t.guideImg && !t.guideLm ? `<div class="status err" style="margin-top:6px">생성된 사진에서 얼굴 인식이 안 돼서 원본 사진으로 표시 중이에요. 다시 생성해 주세요.</div>` : ""}
     ${(t.guideCands || []).length ? `<div class="thumbs" style="margin-top:8px">${t.guideCands.map((c, j) => `<div class="th"><div style="border:2px solid ${t.guideImg === c.img ? "var(--br)" : "transparent"};height:130px;position:relative"><img src="${BlobCache.get(c.img)}" data-mkgpick="${j}" style="cursor:pointer;object-fit:contain">${qTag(c.q)}</div></div>`).join("")}</div><div class="mut">썸네일을 누르면 그 사진으로 6쪽이 바뀝니다.</div>` : `<p class="mut" style="margin-top:6px">생성 전에는 원본 정면 사진으로 미리 보여 드려요.</p>`}</div>` : ""}
-  <div class="card"><h3>6쪽에 들어갈 글 (AI 분석)</h3>${G ? `<p class="mut">AI 분석 내용: 핵심 포인트 ${G.core?.length || 0}개 · 섹션 ${G.sections?.length || 0}개</p>` : `<p class="mut">1단계 AI 분석을 먼저 실행하면 더 정확한 내용으로 만들어집니다.</p>`}
-    ${G ? `${field("texts.makeupGuide.intro", "부제")}${field("texts.makeupGuide.overall", "전체적인 인상과 메이크업 방향", { rows: 3 })}<details><summary>섹션 ${G.sections?.length || 0}개 내용 보기·수정</summary>${(G.sections || []).map((s, i) => `${field(`texts.makeupGuide.sections.${i}.title`, `${i + 1}. 제목`, { input: true })}${field(`texts.makeupGuide.sections.${i}.sub`, "부제", { input: true })}`).join("")}</details>` : ""}
+  <div class="card"><h3>6쪽에 들어갈 글 (AI 분석)</h3>${G ? `<p class="mut">핵심 포인트 ${G.core?.length || 0}개 · 표시 부위 ${guideSections(st).length}개. 일부 설명이 빠져도 나머지 부위는 기본 문장으로 채웁니다.</p>` : `<p class="mut">1단계 AI 분석을 먼저 실행하면 더 정확한 내용으로 만들어집니다. 기본 문장으로도 10개 부위가 표시됩니다.</p>`}
+    ${G ? `${field("texts.makeupGuide.intro", "부제")}${field("texts.makeupGuide.overall", "전체적인 인상과 메이크업 방향", { rows: 3 })}<details><summary>AI 작성 내용 보기·수정</summary>${(Array.isArray(G.sections) ? G.sections : []).map((s, i) => `${field(`texts.makeupGuide.sections.${i}.title`, `${i + 1}. 제목`, { input: true })}${field(`texts.makeupGuide.sections.${i}.sub`, "부제", { input: true })}`).join("")}</details>` : ""}
     ${mode === "image" ? `<div class="row" style="margin-top:8px"><button class="btn sm pri" id="mkGen">✨ GPT 포스터 한 장 생성 (글씨 포함 · 고품질 약 280원)</button>` : `<div class="row" style="display:none">`}${t.fullImage ? `<span class="mut">✓ 생성됨 — 다시 누르면 새로 만듭니다</span>` : ""}</div>
     ${mode === "image" && (t.cands || []).length ? `<div class="thumbs" style="margin-top:8px">${t.cands.map((c, j) => `<div class="th"><div style="border:2px solid ${t.fullImage === c ? "var(--br)" : "transparent"};height:120px"><img src="${BlobCache.get(c)}" data-mkpick="${j}" style="cursor:pointer;object-fit:contain"></div></div>`).join("")}</div>` : ""}</div>
   ${!st.front.pts ? `<div class="status err">자동 얼굴 인식이 안 된 상태라 부위 사진을 만들 수 없어요. 문장만 작성하거나 아래에서 이미지로 대체하세요.</div>` : ""}
@@ -650,10 +670,24 @@ function viewMakeup() {
 }
 POST[6] = E => {
   const g = $("#mkGen", E); if (g) g.onclick = async () => { if (!_aiConsent) { if (!confirm("고객 사진이 OpenAI(GPT 이미지)로 전송됩니다.\n고객에게 동의를 받으셨나요?")) return; _aiConsent = true; }
-    g.disabled = true; g.textContent = "생성 중… (1~2분)"; const targetState = st, t = targetState.texts.makeup; activeAIRequests++; try { const r = await generateAIImage("makeupPoster", targetState, null, { mode: "final" }); const img = await shrinkDataURL(r.image, 1600); if (st !== targetState) return; t.cands = [...(t.cands || []), img].slice(-4); t.fullImage = img; t.mode = "image"; autosave(); renderPreview(); } catch (e) { toast("생성 실패: " + esc(e.message), 7000); } finally { activeAIRequests--; } renderEditor(); };
+    ImageSource.stampLegacySources(st);
+    g.disabled = true; g.textContent = "생성 중… (1~2분)";
+    const targetState = st, t = targetState.texts.makeup, requestedSource = ImageSource.sourceKey(st, "makeup"), requestedDesign = makeupPrompt(st), previousImage = t.fullImage;
+    activeAIRequests++;
+    try {
+      const r = await generateAIImage("makeupPoster", targetState, null, { mode: "final" }); const img = await shrinkDataURL(r.image, 1600);
+      if (st !== targetState || targetState.texts.makeup !== t) return;
+      t.cands = [...(t.cands || []), img].slice(-4); t.candSources = [...(t.candSources || []), requestedSource].slice(-4);
+      const changed = requestedSource !== ImageSource.sourceKey(targetState, "makeup") || requestedDesign !== makeupPrompt(targetState) || previousImage !== t.fullImage;
+      if (changed) toast("사진이나 선택이 바뀌어 생성 결과는 후보에 보관했어요. 현재 사진은 유지합니다.", 5000);
+      else { t.fullImage = img; t.fullImageSourceKey = requestedSource; t.mode = "image"; }
+      autosave(); renderPreview();
+    } catch (e) { toast("생성 실패: " + esc(e.message), 7000); } finally { activeAIRequests--; }
+    renderEditor();
+  };
   $$("[data-mkg]", E).forEach(b => b.onclick = () => runMakeupGuide(b, b.dataset.mode));
-  $$("[data-mkgpick]", E).forEach(im => im.onclick = () => { const t = st.texts.makeup; const c = t.guideCands[+im.dataset.mkgpick]; t.guideImg = c.img; t.guideLm = c.lm; t.guideQ = c.q; renderEditor(); renderPreview(); autosave(); });
-  $$("[data-mkpick]", E).forEach(im => im.onclick = () => { const t = st.texts.makeup; t.fullImage = t.cands[+im.dataset.mkpick]; t.mode = "image"; renderEditor(); renderPreview(); autosave(); });
+  $$("[data-mkgpick]", E).forEach(im => im.onclick = () => { const t = st.texts.makeup; const c = t.guideCands[+im.dataset.mkgpick]; if (!ImageSource.matches(st, "makeup", c.sourceKey)) { toast("이전 고객 사진으로 만든 후보예요. 현재 사진으로 다시 생성해 주세요.", 5000); return; } t.guideImg = c.img; t.guideLm = c.lm; t.guideQ = c.q; t.guideSourceKey = c.sourceKey || ImageSource.sourceKey(st, "makeup"); renderEditor(); renderPreview(); autosave(); });
+  $$("[data-mkpick]", E).forEach(im => im.onclick = () => { const t = st.texts.makeup, j = +im.dataset.mkpick, sourceKey = t.candSources?.[j]; if (!ImageSource.matches(st, "makeup", sourceKey)) { toast("이전 고객 사진으로 만든 후보예요. 현재 사진으로 다시 생성해 주세요.", 5000); return; } t.fullImage = t.cands[j]; t.fullImageSourceKey = sourceKey || ImageSource.sourceKey(st, "makeup"); t.mode = "image"; renderEditor(); renderPreview(); autosave(); });
   bindImgSlots(E);
   $$("[name=mkmode]", E).forEach(r => r.onchange = () => { st.texts.makeup.mode = r.value; renderEditor(); renderPreview(); autosave(); });
   $$("[data-mkvar]", E).forEach(s => s.onchange = () => { const k = s.dataset.mkvar; const v = MAKEUP_LIB[k].variants[s.value]; const sec = st.texts.makeup.sections[k];

@@ -14,6 +14,14 @@ async function toJpeg(src, max = 1024, q = 0.9) {
   return c.toDataURL("image/jpeg", q);
 }
 async function shrinkDataURL(src, max = 1100) { return toJpeg(src, max, 0.9); }
+async function originalEditCanvas(src, size) {
+  const img = await loadImage(src), [width, height] = size.split("x").map(Number);
+  const canvas = document.createElement("canvas"); canvas.width = width; canvas.height = height;
+  const scale = Math.min(width / img.width, height / img.height), w = img.width * scale, h = img.height * scale;
+  const g = canvas.getContext("2d"); g.fillStyle = "#fff"; g.fillRect(0, 0, width, height);
+  g.drawImage(img, (width - w) / 2, (height - h) / 2, w, h);
+  return canvas.toDataURL("image/jpeg", 0.94);
+}
 /** 측면 사진에서 귀 주변을 정사각형으로 잘라냄 (귀걸이 합성용) */
 async function earCrop(st) {
   const E = st.ear.src ? st.ear : { src: st.side.src, w: st.side.w, h: st.side.h, lobe: st.ear.lobe };
@@ -38,12 +46,11 @@ function accessoryImageDetails(kind, st, item) {
   const guide = (section.scales || []).map((v, i) => `${labels[i]}: ${v}/4 (${one(section.scaleText?.[i])})`).join("; ");
   return `Selected accessory color: ${one(item.color || (kind === "glasses" ? "silver" : "gold"))}. Relative size for this item: ${Number(item.size) || 1}x. Overall styling guidance: ${guide || "balanced with the customer's features"}. Follow these selected settings for the accessory.`;
 }
-function imgPromptFor(kind, st, item) {
+function imgPromptFor(kind, st, item, reference = "SECOND") {
   const keep = "Keep the SAME person: identical face, facial features, skin tone, freckles/texture, expression, head angle and lighting. Photorealistic, natural, high detail, no text, no watermark.";
-  if (kind === "hair") return `Edit the first photo (a real customer). Change ONLY her hairstyle to: "${one(item.name)}". Style description (Korean): ${one(item.desc)}. ${item.prompt ? "Details: " + one(item.prompt) + "." : ""}
-${item.ref ? "Use the SECOND image only as the hairstyle reference (cut, length, layering, curl pattern, volume, parting). Do NOT copy the reference person's face." : ""}
-Keep her natural hair color. ${keep}
-Output: front-facing studio portrait from the top of the head to the upper chest, centered, plain light-gray background, soft even light, plain black top.`;
+  if (kind === "hair") return `Edit the FIRST image: it is the customer's original photograph and the ONLY source of identity. Change ONLY the hair to: "${one(item.name)}". Style description (Korean): ${one(item.desc)}. ${item.prompt ? "Hair details only: " + one(item.prompt) + "." : ""}
+${item.ref ? `Use the ${reference} image only as the hairstyle reference (cut, length, layering, curl pattern, volume, parting). Do NOT copy the reference person's face, skin, age, expression, clothing or background.` : ""}
+Preserve the FIRST image's exact face outline, eyes, eyelids, nose, lips, eyebrows, facial proportions, skin tone and texture, natural hair color, expression and head position. Do not beautify, retouch, slim, reshape or replace the face. Keep clothing, body, pose, lighting and background unchanged. Preserve the exact canvas, framing and pixel position of the face; do not crop, rotate, zoom, recenter or create a new portrait. Respect the opaque face-protection mask. Only hair, including the fringe above the brows, may change. Photorealistic edit, no text, no watermark.`;
   if (kind === "glasses") return `Edit this photo of a real customer. Add eyeglasses: "${one(item.name)}" — ${SHAPE_EN[item.shape] || ""} frame, ${one(item.prompt || item.desc)}.
 ${accessoryImageDetails(kind, st, item)}
 The glasses sit naturally on the nose bridge and ears, correct scale, clear non-tinted lenses with subtle reflections, soft contact shadows. ${keep}
@@ -55,7 +62,7 @@ Realistic jewelry scale and weight, natural reflections, soft contact shadow on 
 }
 function makeupPrompt(st) {
   const G = st.texts.makeupGuide || {}; const T = st.texts.makeup;
-  const secs = (G.sections && G.sections.length ? G.sections : Object.values(T.sections).map(s => ({ title: s.title, sub: s.sub, steps: s.steps }))).slice(0, 10);
+  const secs = guideSections(st);
   const core = (G.core && G.core.length ? G.core : T.keyPoints).slice(0, 4);
   const lines = secs.map((s, i) => `${i + 1}. ${s.title} — ${one(s.sub)}\n   ${(s.steps || []).map((x, j) => `${["①", "②", "③", "④"][j]} ${one(x)}`).join("\n   ")}`).join("\n");
   return `Create a vertical A4-style Korean beauty infographic poster titled "맞춤 메이크업 가이드", personalized for the woman in the input photo. Use HER real face (same identity, features, skin, freckles) in every photo crop. Clean, elegant magazine layout: warm ivory/blush background, soft pink accents, numbered pink circle badges, thin rounded section boxes, crisp small Korean text exactly as given below (do not invent extra text; keep spelling exact).
@@ -75,13 +82,12 @@ Photorealistic makeup applied subtly and correctly on her real features. Portrai
 /** 6쪽용: 글씨 없이 메이크업만 적용한 정면 사진 (글씨·번호는 프로그램이 얹음) */
 function makeupFacePrompt(st) {
   const G = st.texts.makeupGuide || {}; const T = st.texts.makeup;
-  const secs = (G.sections && G.sections.length ? G.sections : Object.values(T.sections).map(s => ({ title: s.title, sub: s.sub, steps: s.steps }))).slice(0, 10);
+  const secs = guideSections(st);
   const plan = secs.map(s => `- ${s.title}: ${one(s.sub)} (${(s.steps || []).map(one).join(" / ")})`).join("\n");
-  return `Edit this photo of a real customer. Apply the following personalized makeup to HER face, realistically and tastefully (Korean beauty-salon quality, natural finish):
+  return `Edit the FIRST image, the customer's ORIGINAL photograph and the ONLY source of facial identity. Apply ONLY the following cosmetics to her existing face, realistically and tastefully (Korean beauty-salon quality, natural finish):
 ${plan}
 Overall direction: ${one(G.overall || T.head)}
-Keep the SAME person: identical face shape, features, skin tone and texture, expression. Do not slim or reshape the face.
-Output: straight-on front-facing beauty portrait, eyes open looking at camera, neutral relaxed mouth, hair tucked behind the ears and away from the forehead and cheeks so brows, eyes, nose, cheeks, jawline and lips are fully visible, soft even studio light, plain warm light-ivory background, face centered and filling about 70% of the frame from the top of the forehead to the chin.
+Preserve her exact identity, face outline, eyes and eyelids, nose, lips, facial proportions, skin tone and natural texture. Do not beautify, slim, reshape, smooth away identity details or replace the face. Change makeup colors and application only; do not change facial anatomy. Keep the original expression, gaze, eye openness, head angle, hairstyle, hair color, clothing, body, background and lighting. Keep the original composition, crop and face position; do not create a new studio portrait.
 ABSOLUTELY NO text, letters, numbers, labels, arrows, lines, frames or watermark — a clean photo only.`;
 }
 const IMG_COST_KRW = 1400; // 1달러 환산(대략)
@@ -90,19 +96,31 @@ const IMG_Q = { draft: "low", final: "medium" };
 /** 서버 호출. opts.mode: "draft"(저품질 시안) | "final"(중간 품질), opts.base: 고화질로 다시 만들 시안 이미지 */
 async function generateAIImage(kind, st, item, opts = {}) {
   const mode = opts.mode || "final"; const quality = IMG_Q[mode] || "medium";
-  let images = [], size = "1024x1536", prompt;
-  if (kind === "makeup") { images = [await toJpeg(st.photos.frontOrig || st.photos.front, 1024)]; prompt = makeupFacePrompt(st); }
-  else if (kind === "makeupPoster") { images = [await toJpeg(st.photos.frontOrig || st.photos.front, 1024)]; prompt = makeupPrompt(st); }
-  else if (kind === "earrings") { const e = await earCrop(st); if (!e) throw new Error("측면(귀) 사진이 없습니다"); images = [e]; prompt = imgPromptFor(kind, st, item); }
-  else { images = [await toJpeg(st.photos.frontOrig || st.photos.front, 1024)]; if (kind === "hair" && item.ref) images.push(await libImage(item.ref)); if (kind === "glasses" || kind === "hair") size = "1024x1024"; prompt = imgPromptFor(kind, st, item); }
-  if (opts.base) { // 고른 시안을 그대로 고화질로
-    images = [await toJpeg(opts.base, 1024), images[0]];
-    prompt = `Recreate the FIRST image faithfully at higher quality and sharper detail: keep the exact same composition, framing, pose, hairstyle/accessory/makeup design, colors and background. Use the SECOND image only to restore the person's exact facial identity, skin texture and fine details. Change nothing else. No text, no watermark.`;
+  const original = st.photos.frontOrig || st.photos.front, selected = item ? { ...item } : null;
+  if (kind !== "earrings" && !original) throw new Error("고객 원본 정면 사진을 먼저 올려 주세요.");
+  let images = [], size = "1024x1536", prompt, identity = null;
+  if (kind === "makeup" || kind === "makeupPoster") {
+    prompt = kind === "makeup" ? makeupFacePrompt(st) : makeupPrompt(st);
+    images = [await originalEditCanvas(original, size)];
+  } else if (kind === "earrings") {
+    prompt = imgPromptFor(kind, st, selected);
+    const e = await earCrop(st); if (!e) throw new Error("측면(귀) 사진이 없습니다"); images = [e];
+  } else {
+    size = "1024x1024"; prompt = imgPromptFor(kind, st, selected, opts.base ? "THIRD" : "SECOND");
+    if (kind === "hair") {
+      identity = await IdentityEdit.prepare({ photos: { frontOrig: original, front: st.photos.front }, front: st.front }, size);
+      images = [identity.image];
+      if (selected.ref) images.push(await libImage(selected.ref));
+    } else images = [await toJpeg(original, 1024)];
   }
-  const r = await apiPost("/api/image", { kind, prompt, images, size, quality });
+  if (opts.base) { // 원본 고객이 항상 첫 사진이고, 시안은 디자인만 참고한다.
+    images = [images[0], await toJpeg(opts.base, 1024), ...images.slice(1)];
+    prompt = `The FIRST image is the original customer and the ONLY identity source. The SECOND image is a draft for ${kind === "makeup" ? "cosmetic colors and application" : kind === "hair" ? "hairstyle" : "accessory design"} only. Reapply that design at higher quality to the FIRST photograph. Never copy a changed face, anatomy, expression, pose, clothing or background from the draft. Preserve the original person's exact features and face position.\n${prompt}`;
+  }
+  const r = await apiPost("/api/image", { kind, prompt, images, size, quality, ...(identity ? { mask: identity.mask } : {}) });
   const usd = r.cost ?? 0;
   (st.costs = st.costs || []).push({ kind, quality, usd, at: Date.now() });
-  return { image: r.image, quality, usd };
+  return { image: identity ? await identity.restore(r.image) : r.image, quality, usd };
 }
 function costSummary(st) {
   const L = st.costs || []; const usd = L.reduce((s, c) => s + (c.usd || 0), 0);

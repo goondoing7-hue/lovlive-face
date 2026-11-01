@@ -153,7 +153,8 @@ function pageSide(st) {
 function pageHair(st) {
   const t = st.texts.hair; const F = st.photos.front;
   const cards = t.items.map(it => {
-    const img = it.img ? `<img src="${BlobCache.get(it.img)}" alt="">` : (F ? `<div class="ph-wrap ph-ghost">${photoSVG(F, st.front.w, st.front.h, frontFrame(st, 259 / 293))}<span>AI 헤어 이미지 생성 전</span></div>` : `<div class="ph-empty">헤어 이미지</div>`);
+    const current = ImageSource.isCurrentImage(st, "hair", it);
+    const img = current ? `<img src="${BlobCache.get(it.img)}" alt="">` : (F ? `<div class="ph-wrap ph-ghost">${photoSVG(F, st.front.w, st.front.h, frontFrame(st, 259 / 293))}<span>${it.img ? "현재 사진·스타일로 다시 생성해 주세요" : "AI 헤어 이미지 생성 전"}</span></div>` : `<div class="ph-empty">헤어 이미지</div>`);
     return `<div class="hcard"><div class="himg">${img}</div><div class="hname">${nl(it.name)}</div><div class="hdesc">${nl(it.desc)}</div></div>`;
   }).join("");
   const vol = t.volume.map(v => `<div class="vcol"><div class="vz">${esc(v.zone)}</div><div class="vt">${nl(v.text)}</div></div>`).join("");
@@ -199,7 +200,7 @@ function makeupHeaderPhoto(st) {
 function pageMakeup(st) {
   const t = st.texts.makeup;
   if (t.mode !== "template" && t.mode !== "image") return pageMakeupGuide(st);
-  if (t.mode !== "template") return t.fullImage ? `<section class="page p6 full"><img src="${BlobCache.get(t.fullImage)}" alt=""></section>` : `<section class="page p6"><div class="ph-empty" style="position:absolute;inset:40px">메이크업 가이드 — 6단계에서 GPT로 생성하거나 템플릿 방식을 고르세요</div></section>`;
+  if (t.mode !== "template") return ImageSource.isCurrentPoster(st) ? `<section class="page p6 full"><img src="${BlobCache.get(t.fullImage)}" alt=""></section>` : `<section class="page p6"><div class="ph-empty" style="position:absolute;inset:40px">메이크업 가이드 — 6단계에서 현재 사진으로 생성하거나 템플릿 방식을 고르세요</div></section>`;
   const F = st.photos.front;
   const sec = (k, n, compact) => {
     const s = t.sections[k]; const crops = makeupCrops(st, k, s.variant);
@@ -241,7 +242,7 @@ function lensPath(shape, a, b) { // 로컬 좌표: +x = 바깥쪽
 }
 function glassesSVG(st, item, idx, scales) {
   const F = st.photos.front; if (!F) return `<div class="ph-empty">사진</div>`;
-  if (item.useUpload && item.img) return `<img src="${BlobCache.get(item.img)}" alt="">`;
+  if (item.useUpload && ImageSource.isCurrentImage(st, "glasses", item)) return `<img src="${BlobCache.get(item.img)}" alt="">`;
   const { h, v } = st.front.lines; const ew = v.eRi - v.eRo, fw = v.faceR - v.faceL, fh = h.chin - h.hair;
   const eyeY = (h.upLid + h.lowLid) / 2;
   const GH = fh / 0.6, GW = GH * 157 / 160; const box = [(v.faceL + v.faceR) / 2 - GW / 2, h.hair - 0.17 * GH, GW, GH];
@@ -275,7 +276,7 @@ function glassesSVG(st, item, idx, scales) {
 
 /* ================= 귀걸이 착용 시뮬레이션 ================= */
 function earringSVG(st, item, idx) {
-  const E = st.ear; if (item.useUpload && item.img) return `<img src="${BlobCache.get(item.img)}" alt="">`;
+  const E = st.ear; if (item.useUpload && ImageSource.isCurrentImage(st, "earrings", item)) return `<img src="${BlobCache.get(item.img)}" alt="">`;
   if (!E.src) return `<div class="ph-empty">귀 사진</div>`;
   const S = Math.min(E.w, E.h) * 0.45 / (E.zoom || 1);
   const lobe = E.lobe || [E.w / 2, E.h / 2];

@@ -6,25 +6,79 @@
    ===================================================================== */
 const G_KEYS = ["brow", "shadow", "liner", "under", "lash", "nose", "blush", "contour", "lip", "skin"];
 const G_TITLES = { brow: "눈썹 메이크업", shadow: "아이섀도우", liner: "아이라인", under: "언더 메이크업", lash: "속눈썹 메이크업", nose: "코 메이크업", blush: "블러셔", contour: "윤곽 셰이딩", lip: "립 메이크업", skin: "피부 표현" };
-function gKeyFor(title, i) {
-  const t = String(title || "");
-  const rules = [[/속눈썹/, "lash"], [/눈썹/, "brow"], [/섀도|쉐도/, "shadow"], [/라인/, "liner"], [/언더|애교/, "under"], [/코/, "nose"], [/블러/, "blush"], [/윤곽|셰이딩|쉐이딩|쉐딩/, "contour"], [/립|입술/, "lip"], [/피부|베이스/, "skin"]];
+function gKeyFor(title) {
+  const t = String(title || "").trim().toLowerCase();
+  const aliases = { eyebrow: "brow", eyebrows: "brow", eye: "shadow", eyeshadow: "shadow", eye_shadow: "shadow", eyeliner: "liner", eye_liner: "liner", undereye: "under", under_eye: "under", eyelash: "lash", eyelashes: "lash", mascara: "lash", cheek: "blush", contouring: "contour", lips: "lip", base: "skin" };
+  if (G_KEYS.includes(t)) return t;
+  if (aliases[t]) return aliases[t];
+  const rules = [[/속눈썹|eyelash|mascara/, "lash"], [/눈썹|eyebrow|\bbrows?\b/, "brow"], [/언더|애교|under[ _-]?eye|lower[ _-]?lid/, "under"], [/아이라인|아이\s*라인|eyeliner|eye[ _-]?liner|\bliner\b/, "liner"], [/섀도|쉐도|eyeshadow|eye[ _-]?shadow/, "shadow"], [/^(?:\d+[.)-]?\s*)?코(?:\s|메이크업|쉐딩|셰이딩|쉐이딩|윤곽|하이라이트|$)|콧대|콧볼|코끝|\bnose\b/, "nose"], [/블러|치크|\bblush\b|\bcheek\b/, "blush"], [/윤곽|셰이딩|쉐이딩|쉐딩|\bcontour|\bshading\b/, "contour"], [/립|입술|\blips?\b/, "lip"], [/피부|베이스|\bskin\b|\bcomplexion\b|\bbase\b/, "skin"]];
   for (const [re, k] of rules) if (re.test(t)) return k;
-  return G_KEYS[i] || "skin";
+  return null;
 }
 /** 가이드에 쓸 사진: GPT 메이크업 사진(인식 성공 시) → 없으면 원본 정면 사진 */
 function guideSource(st) {
   const t = st.texts.makeup;
-  if (t.guideImg && t.guideLm && t.guideLm.pts) return { src: t.guideImg, w: t.guideLm.w, h: t.guideLm.h, P: t.guideLm.pts, gpt: true };
+  if (t.guideImg && t.guideLm && t.guideLm.pts && typeof ImageSource !== "undefined" && ImageSource.isCurrentMakeup(st)) return { src: t.guideImg, w: t.guideLm.w, h: t.guideLm.h, P: t.guideLm.pts, gpt: true };
   if (st.photos.front && st.front.pts) return { src: st.photos.front, w: st.front.w, h: st.front.h, P: st.front.pts, gpt: false };
   return null;
 }
-/** 섹션 목록: AI 메이크업 가이드(10개) → 없으면 자동 템플릿 문장으로 대체 */
+/** 일부 AI 섹션만 왔어도 부위별 원문을 유지하면서 기존 문장으로 10개를 완성한다. */
 function guideSections(st) {
-  const G = st.texts.makeupGuide;
-  if (G && G.sections && G.sections.length) return G.sections.slice(0, 10).map((s, i) => ({ key: gKeyFor(s.title, i), title: s.title, sub: s.sub || "", steps: (s.steps || []).slice(0, 4) }));
-  const T = st.texts.makeup.sections; const map = { brow: "brow", eye: "shadow", nose: "nose", blush: "blush", contour: "contour", lip: "lip", skin: "skin" };
-  return Object.entries(map).filter(([k]) => T[k]).map(([k, g]) => ({ key: g, title: G_TITLES[g], sub: T[k].sub || "", steps: (T[k].steps || []).slice(0, 3) }));
+  const G = st.texts.makeupGuide || {}, T = st.texts.makeup?.sections || {};
+  const text = value => typeof value === "string" ? value.trim() : "";
+  const steps = value => Array.isArray(value) ? value.map(text).filter(Boolean).slice(0, 4) : [];
+  const defaults = {
+    brow: { sub: "본래 눈썹의 결을 살려 자연스럽게 정리", steps: ["빈 부분은 모발 방향으로 가볍게 채웁니다.", "눈썹산은 부드럽게 이어 줍니다.", "꼬리는 가늘고 깔끔하게 정리합니다."] },
+    shadow: { sub: "얇은 음영으로 눈매의 깊이를 표현", steps: ["눈두덩이에 밝은 베이스를 얇게 펴 바릅니다.", "눈꼬리 쪽에 은은한 음영을 더합니다.", "색의 경계를 부드럽게 블렌딩합니다."] },
+    liner: { sub: "속눈썹 사이를 정리해 눈매를 또렷하게", steps: ["속눈썹 사이의 빈 부분을 얇게 채웁니다.", T.eye?.variant === "upturn" ? "눈꼬리는 자연스럽게 살짝 올립니다." : "눈꼬리 흐름을 따라 짧게 연장합니다.", "두꺼운 선 대신 가는 라인으로 정리합니다."] },
+    under: { sub: "가벼운 음영으로 눈 아래를 자연스럽게 정돈", steps: ["언더 눈꼬리에 옅은 음영을 더합니다.", "애교살은 얇고 자연스럽게 표현합니다.", "진한 선 대신 경계를 부드럽게 풀어줍니다."] },
+    lash: { sub: "결을 살린 컬링으로 자연스럽게 마무리", steps: ["뷰러로 뿌리부터 부드럽게 컬링합니다.", "마스카라를 얇게 덧발라 뭉침을 줄입니다.", "눈매에 맞춰 길이와 볼륨을 조절합니다."] },
+    nose: { sub: "얇은 음영으로 본래의 입체감을 정리", steps: ["콧대 양옆에 얇게 음영을 넣습니다.", "콧볼 주변의 경계를 부드럽게 풀어줍니다.", "콧대 중앙에는 은은한 빛을 더합니다."] },
+    blush: { sub: "가벼운 발색으로 자연스러운 생기를 표현", steps: ["볼의 중심에 소량씩 발색합니다.", "얼굴형에 맞춰 범위를 조절합니다.", "바깥 경계를 부드럽게 블렌딩합니다."] },
+    contour: { sub: "얼굴 외곽의 음영을 부드럽게 연결", steps: ["외곽에 얇고 가벼운 음영을 더합니다.", "경계가 남지 않도록 충분히 블렌딩합니다.", "본래 얼굴선을 과하게 바꾸지 않습니다."] },
+    lip: { sub: "본래 입술선을 살려 균형 있게 표현", steps: ["입술의 건조한 부분을 가볍게 정돈합니다.", "본래 입술선을 따라 얇게 발색합니다.", "가장자리를 부드럽게 마무리합니다."] },
+    skin: { sub: "얇은 베이스로 피부 결을 자연스럽게 표현", steps: ["피부를 촉촉하게 준비합니다.", "베이스를 얇게 나누어 펴 바릅니다.", "필요한 부위만 소량씩 정돈합니다."] },
+  };
+  const eye = [...steps(T.eye?.steps), ...steps(T.eye?.points)];
+  const eyePart = {
+    shadow: line => /음영|섀도|쉐도|베이스|블렌딩/.test(line) && !/언더|애교/.test(line),
+    liner: line => /아이라인|점막|속눈썹\s*사이|눈꼬리.*(?:연장|빼)/.test(line),
+    under: line => /언더|애교/.test(line),
+    lash: line => /속눈썹|마스카라|컬링|뷰러/.test(line) && !/속눈썹\s*사이|점막|아이라인/.test(line),
+  };
+  const found = new Map();
+  const raw = Array.isArray(G.sections) ? G.sections : G.sections && typeof G.sections === "object" ? Object.entries(G.sections).map(([key, value]) => value && typeof value === "object" ? { ...value, key: value.key || key } : null) : [];
+  for (const section of raw) {
+    if (!section || typeof section !== "object") continue;
+    const explicit = gKeyFor(section.key), titled = gKeyFor(section.title);
+    if (explicit && titled && explicit !== titled) continue;
+    const key = explicit || titled;
+    if (!key) continue;
+    const entry = { key, title: titled === key ? text(section.title) : G_TITLES[key], sub: text(section.sub), steps: steps(section.steps) };
+    const previous = found.get(key);
+    if (!previous || !previous.steps.length && entry.steps.length) found.set(key, entry);
+  }
+  return G_KEYS.map(key => {
+    const source = T[key] || (key === "shadow" ? T.eye : null);
+    const fallback = { ...defaults[key], steps: defaults[key].steps.slice() };
+    if (source && (!gKeyFor(source.title) || gKeyFor(source.title) === key)) {
+      fallback.sub = text(source.sub) || fallback.sub;
+      const plan = key === "shadow" && source === T.eye ? steps(source.steps).filter(eyePart.shadow) : steps(source.steps);
+      if (plan.length) fallback.steps = plan;
+    } else if (eyePart[key]) {
+      const plan = eye.filter(eyePart[key]).slice(0, 4);
+      if (plan.length) fallback.steps = plan;
+    }
+    const entry = found.get(key);
+    const complete = entry?.steps.length ? entry.steps.slice() : fallback.steps.slice();
+    if (key === "skin") {
+      for (const line of [...steps(T.skin?.points).slice(1), ...defaults.skin.steps]) {
+        if (complete.length >= 3) break;
+        if (!complete.includes(line)) complete.push(line);
+      }
+    }
+    return { key, title: entry?.title || G_TITLES[key], sub: entry?.sub || fallback.sub, steps: complete };
+  });
 }
 
 function guideCrop(S, key, aspect) {

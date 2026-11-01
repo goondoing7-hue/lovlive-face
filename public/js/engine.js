@@ -66,17 +66,17 @@ async function rotateDataURL(src, deg) {
 }
 
 /* ---------------- 얼굴 랜드마크 (MediaPipe FaceMesh) ---------------- */
-let _fm = null, _fmResolve = null;
+let _fm = null, _fmResolve = null, _fmQueue = Promise.resolve();
 const FM_BASE = "https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh@0.4.1633559619/";
 function ensureFaceMesh() {
   if (_fm) return Promise.resolve(_fm);
   return new Promise((res, rej) => {
     const go = () => {
       try {
-        _fm = new FaceMesh({ locateFile: f => FM_BASE + f });
-        _fm.setOptions({ staticImageMode: true, selfieMode: false, maxNumFaces: 1, refineLandmarks: true, minDetectionConfidence: 0.4, minTrackingConfidence: 0.4 });
-        _fm.onResults(r => { if (_fmResolve) { const f = _fmResolve; _fmResolve = null; f(r); } });
-        res(_fm);
+        const fm = new FaceMesh({ locateFile: f => FM_BASE + f });
+        fm.setOptions({ staticImageMode: true, selfieMode: false, maxNumFaces: 1, refineLandmarks: true, minDetectionConfidence: 0.4, minTrackingConfidence: 0.4 });
+        fm.onResults(r => { if (_fm === fm && _fmResolve) { const f = _fmResolve; _fmResolve = null; f(r); } });
+        _fm = fm; res(fm);
       } catch (e) { rej(e); }
     };
     if (window.FaceMesh) return go();
@@ -85,13 +85,29 @@ function ensureFaceMesh() {
     document.head.appendChild(s);
   });
 }
-async function detectLandmarks(src) {
+function detectLandmarks(src) {
+  const job = _fmQueue.then(() => runLandmarks(src));
+  _fmQueue = job.catch(() => {});
+  return job;
+}
+async function runLandmarks(src) {
   const fm = await ensureFaceMesh();
   const img = await loadImage(src);
-  const r = await Promise.race([
-    new Promise(res => { _fmResolve = res; try { fm.reset && fm.reset(); } catch (e) {} fm.send({ image: img }); }),
-    new Promise((_, rej) => setTimeout(() => rej(new Error("얼굴 인식 시간 초과")), 30000)),
-  ]);
+  const r = await new Promise((res, rej) => {
+    let settled = false;
+    const finish = result => { if (settled) return; settled = true; clearTimeout(timer); res(result); };
+    const fail = error => {
+      if (settled) return;
+      settled = true; clearTimeout(timer);
+      if (_fm === fm) { _fmResolve = null; _fm = null; }
+      try { Promise.resolve(fm.close && fm.close()).catch(() => {}); } catch (e) {}
+      rej(error);
+    };
+    const timer = setTimeout(() => fail(new Error("얼굴 인식 시간 초과")), 30000);
+    _fmResolve = finish;
+    try { fm.reset && fm.reset(); } catch (e) {}
+    try { Promise.resolve(fm.send({ image: img })).catch(fail); } catch (e) { fail(e); }
+  });
   const lm = r.multiFaceLandmarks && r.multiFaceLandmarks[0];
   if (!lm) return null;
   return { w: img.width, h: img.height, pts: lm.map(p => [p.x * img.width, p.y * img.height]) };

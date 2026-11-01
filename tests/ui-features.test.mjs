@@ -4,7 +4,7 @@ import test from "node:test";
 import vm from "node:vm";
 
 const library = JSON.parse(await readFile(new URL("../public/hair/library.json", import.meta.url), "utf8"));
-const files = ["lib.js", "engine.js", "render.js", "accessory_scales.js", "hair_picker.js", "ai_image.js", "shell.js", "project_store.js", "ui.js", "project_ui.js"];
+const files = ["lib.js", "engine.js", "image_source.js", "render.js", "accessory_scales.js", "hair_picker.js", "mkguide.js", "ai_image.js", "shell.js", "project_store.js", "ui.js", "project_ui.js"];
 const scripts = await Promise.all(files.map(async file => ({ file, source: await readFile(new URL(`../public/js/${file}`, import.meta.url), "utf8") })));
 const plain = value => JSON.parse(JSON.stringify(value));
 const fixtureImage = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jN1sAAAAASUVORK5CYII=";

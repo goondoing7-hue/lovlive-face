@@ -70,6 +70,12 @@ async function imageClient() {
   const requests = [];
   const loaded = [];
   const context = vm.createContext({
+    IdentityEdit: {
+      async prepare(state) {
+        loaded.push(state.photos.frontOrig || state.photos.front);
+        return { image: `data:image/jpeg;base64,${Buffer.from(state.photos.frontOrig || state.photos.front).toString("base64")}`, mask: "data:image/png;base64,cHJvdGVjdGVkLWZhY2U=", restore: async image => image };
+      },
+    },
     fetch: async () => ({ json: async () => [] }),
     apiPost: async (url, body) => {
       requests.push({ url, ...body });
@@ -93,6 +99,7 @@ async function imageClient() {
       },
     },
   });
+  vm.runInContext(await readFile(path.join(root, "public", "js", "mkguide.js"), "utf8"), context);
   vm.runInContext(await readFile(path.join(root, "public", "js", "ai_image.js"), "utf8"), context);
   const state = {
     photos: { front: "data:image/jpeg;base64,ZnJvbnQ=" },
@@ -122,9 +129,44 @@ test("hair with a published reference reaches the image API with both photos", a
     assert.equal(request.quality, quality);
     assert.equal(request.images.length, 2);
     assert.notEqual(request.images[0], request.images[1]);
+    assert.match(request.mask, /^data:image\/png;base64,/);
     assert.match(request.prompt, /SECOND image only as the hairstyle reference/);
   }
   assert.ok(client.loaded.includes("hair/h01.jpg"));
+});
+
+test("upgrading always keeps the original customer first, with drafts and hair references used only for design", async () => {
+  const client = await imageClient();
+  client.state.photos.frontOrig = "data:image/jpeg;base64,b3JpZ2luYWw=";
+  for (const kind of ["hair", "glasses", "makeup"]) {
+    await client.generate(kind, { name: "selected style", ref: "h01", shape: "round" }, { base: "data:image/jpeg;base64,ZHJhZnQ=", mode: "final" });
+    const request = client.requests.at(-1);
+    assert.equal(Buffer.from(request.images[0].split(",")[1], "base64").toString(), client.state.photos.frontOrig);
+    assert.equal(Buffer.from(request.images[1].split(",")[1], "base64").toString(), "data:image/jpeg;base64,ZHJhZnQ=");
+    assert.match(request.prompt, /FIRST image is the original customer and the ONLY identity source/);
+    assert.match(request.prompt, /Never copy a changed face/);
+    if (kind === "hair") { assert.equal(request.images.length, 3); assert.match(request.prompt, /THIRD image only as the hairstyle reference/); }
+    else assert.equal(request.images.length, 2);
+  }
+});
+
+test("partial makeup plans still instruct all ten areas and preserve the original pose and hairstyle", async () => {
+  const client = await imageClient();
+  client.state.texts.makeupGuide = { sections: [{ title: "눈썹 메이크업", sub: "기존 눈썹 유지", steps: ["빈 곳만 채우기"] }, { title: "아이섀도우", steps: ["얇은 음영"] }] };
+  await client.generate("makeup");
+  const request = client.requests.at(-1);
+  for (const title of ["눈썹 메이크업", "아이섀도우", "아이라인", "언더 메이크업", "속눈썹 메이크업", "코 메이크업", "블러셔", "윤곽 셰이딩", "립 메이크업", "피부 표현"]) assert.ok(request.prompt.includes(title), title);
+  assert.match(request.prompt, /original expression, gaze, eye openness, head angle, hairstyle/);
+  assert.doesNotMatch(request.prompt, /hair tucked behind|eyes open looking at camera|plain warm light-ivory background/);
+  await client.generate("hair", { name: "bob", ref: "h01" });
+  assert.match(client.requests.at(-1).prompt, /do not crop, rotate, zoom, recenter or create a new portrait/);
+  assert.doesNotMatch(client.requests.at(-1).prompt, /plain black top|plain light-gray background/);
+});
+
+test("a draft or reference can never substitute for a missing original customer photograph", async () => {
+  const client = await imageClient(); client.state.photos = {};
+  for (const kind of ["hair", "makeup", "makeupPoster", "glasses"]) await assert.rejects(client.generate(kind, { name: "style", ref: "h01" }, { base: "data:image/jpeg;base64,ZHJhZnQ=" }), /원본 정면 사진/);
+  assert.equal(client.requests.length, 0);
 });
 
 test("a missing reference gives an actionable error before any paid API request", async () => {

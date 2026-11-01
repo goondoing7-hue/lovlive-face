@@ -3,7 +3,8 @@
   "functions": {
     "api/analyze.js": { "maxDuration": 300, "includeFiles": "{kb/**,public/hair/library.json}" },
     "api/image.js": { "maxDuration": 300 },
-    "api/config.js": { "maxDuration": 10 }
+    "api/config.js": { "maxDuration": 10 },
+    "api/projects.js": { "maxDuration": 60 }
   },
   "headers": [{ "source": "/(.*)", "headers": [{ "key": "Cross-Origin-Opener-Policy", "value": "same-origin-allow-popups" }] }]
 }

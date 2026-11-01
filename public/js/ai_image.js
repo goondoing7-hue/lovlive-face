@@ -32,6 +32,12 @@ async function libImage(id) {
 }
 
 const one = s => String(s || "").replace(/\n/g, " ").trim();
+function accessoryImageDetails(kind, st, item) {
+  const section = st.texts?.[kind] || {};
+  const labels = kind === "glasses" ? ["frame thickness", "frame size", "frame width", "color depth", "presence", "opacity"] : ["overall size", "line thickness", "drop length", "width", "lower volume", "ornament"];
+  const guide = (section.scales || []).map((v, i) => `${labels[i]}: ${v}/4 (${one(section.scaleText?.[i])})`).join("; ");
+  return `Selected accessory color: ${one(item.color || (kind === "glasses" ? "silver" : "gold"))}. Relative size for this item: ${Number(item.size) || 1}x. Overall styling guidance: ${guide || "balanced with the customer's features"}. Follow these selected settings for the accessory.`;
+}
 function imgPromptFor(kind, st, item) {
   const keep = "Keep the SAME person: identical face, facial features, skin tone, freckles/texture, expression, head angle and lighting. Photorealistic, natural, high detail, no text, no watermark.";
   if (kind === "hair") return `Edit the first photo (a real customer). Change ONLY her hairstyle to: "${one(item.name)}". Style description (Korean): ${one(item.desc)}. ${item.prompt ? "Details: " + one(item.prompt) + "." : ""}
@@ -39,9 +45,11 @@ ${item.ref ? "Use the SECOND image only as the hairstyle reference (cut, length,
 Keep her natural hair color. ${keep}
 Output: front-facing studio portrait from the top of the head to the upper chest, centered, plain light-gray background, soft even light, plain black top.`;
   if (kind === "glasses") return `Edit this photo of a real customer. Add eyeglasses: "${one(item.name)}" — ${SHAPE_EN[item.shape] || ""} frame, ${one(item.prompt || item.desc)}.
+${accessoryImageDetails(kind, st, item)}
 The glasses sit naturally on the nose bridge and ears, correct scale, clear non-tinted lenses with subtle reflections, soft contact shadows. ${keep}
 Output: front-facing head-and-shoulders portrait, centered, keep original background.`;
   if (kind === "earrings") return `Edit this close-up photo of a real customer's ear. Remove any existing earring and put ONE earring through the earlobe piercing: "${one(item.name)}" — ${SHAPE_EN[item.shape] || ""}, ${one(item.prompt || item.desc)}.
+${accessoryImageDetails(kind, st, item)}
 Realistic jewelry scale and weight, natural reflections, soft contact shadow on skin. Keep ear, hair, skin and lighting the same. Photorealistic product-on-model close-up, vertical 3:4, no text.`;
   return "";
 }

@@ -26,7 +26,10 @@ async function earCrop(st) {
   c.getContext("2d").drawImage(img, x, y, w, h, 0, 0, 768, 1024);
   return c.toDataURL("image/jpeg", 0.92);
 }
-async function libImage(id) { return toJpeg("hair/" + id + ".jpg", 768); }
+async function libImage(id) {
+  try { return await toJpeg("hair/" + id + ".jpg", 768); }
+  catch { throw new Error(`참고 헤어 사진(${id})을 불러오지 못했습니다. 참고 사진을 다시 선택하거나 해제한 뒤 시도해 주세요.`); }
+}
 
 const one = s => String(s || "").replace(/\n/g, " ").trim();
 function imgPromptFor(kind, st, item) {

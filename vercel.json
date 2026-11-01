@@ -1,4 +1,5 @@
 {
+  "buildCommand": "npm run build",
   "functions": {
     "api/analyze.js": { "maxDuration": 300, "includeFiles": "{kb/**,public/hair/library.json}" },
     "api/image.js": { "maxDuration": 300 },
